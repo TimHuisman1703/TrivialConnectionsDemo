@@ -34,8 +34,11 @@ struct MeshBuffer {
 	std::vector<glm::uvec2> edges;
 	std::vector<glm::uvec3> triangles;
 
+	static MeshBuffer empty();
 	static MeshBuffer fromEdges(std::vector<Vertex> vertices, std::vector<glm::uvec2> edges);
 	static MeshBuffer fromTriangles(std::vector<Vertex> vertices, std::vector<glm::uvec3> triangles);
+
+	void load(std::vector<glm::vec3> positions, std::vector<int> indices);
 
 	void cleanUp() const;
 };

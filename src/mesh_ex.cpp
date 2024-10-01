@@ -83,11 +83,21 @@ int MeshEx::otherFace(int e_idx, int f_idx) const {
 		return e.faces[0];
 }
 
+int MeshEx::commonEdgeOfFaces(int f_a_idx, int f_b_idx) const {
+	for (int e_a_idx : faces[f_a_idx].edges) {
+		for (int e_b_idx : faces[f_b_idx].edges) {
+			if (e_a_idx == e_b_idx)
+				return e_a_idx;
+		}
+	}
+	return -1;
+}
+
 glm::vec3 MeshEx::vertexToVertex(int v_src_idx, int v_dst_idx) const {
 	return this->vertices[v_dst_idx].position - this->vertices[v_src_idx].position;
 }
 
-float MeshEx::angleBetweenEdges(int e_a_idx, int e_b_idx) const {
+double MeshEx::angleBetweenEdges(int e_a_idx, int e_b_idx) const {
 	glm::uvec2 vs_a = this->edges[e_a_idx].vertices;
 	glm::uvec2 vs_b = this->edges[e_b_idx].vertices;
 
@@ -125,14 +135,14 @@ glm::vec3 MeshEx::centerOfMass(int f_idx) const {
 	return (vertices[f.vertices[0]].position + vertices[f.vertices[1]].position + vertices[f.vertices[2]].position) * (1.0f / 3.0f);
 }
 
-float MeshEx::curvatureAroundVertex(int v_idx) const {
+double MeshEx::defectAroundVertex(int v_idx) const {
 	const VertexEx& v = vertices[v_idx];
 	int v_degree = v.edges.size();
 
 	int e_curr_idx = v.edges[0];
 	int f_curr_idx = edges[e_curr_idx].faces[0];
 
-	float curvature = 0.0;
+	double curvature = 0.0;
 	for (int i = 0; i < v_degree; i++) {
 		int e_next_idx = otherEdge(v_idx, f_curr_idx, e_curr_idx);
 		curvature += angleBetweenEdges(e_curr_idx, e_next_idx);
@@ -141,5 +151,5 @@ float MeshEx::curvatureAroundVertex(int v_idx) const {
 		f_curr_idx = otherFace(e_curr_idx, f_curr_idx);
 	}
 
-	return curvature;
+	return curvature - 2.0 * glm::pi<double>();
 }

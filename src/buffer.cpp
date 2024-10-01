@@ -1,5 +1,16 @@
 #include "buffer.h"
 
+MeshBuffer MeshBuffer::empty()
+{
+	MeshBuffer result;
+
+	glGenBuffers(1, &result.vbo);
+	glGenBuffers(1, &result.ibo);
+	glGenVertexArrays(1, &result.vao);
+
+	return result;
+}
+
 MeshBuffer MeshBuffer::fromEdges(std::vector<Vertex> vertices, std::vector<glm::uvec2> edges)
 {
 	MeshBuffer result;
@@ -22,7 +33,7 @@ MeshBuffer MeshBuffer::fromEdges(std::vector<Vertex> vertices, std::vector<glm::
 	glEnableVertexAttribArray(1);
 	glBindVertexArray(0);
 
-	result.indices_amount = static_cast<GLsizei>(3 * edges.size());
+	result.indices_amount = static_cast<GLsizei>(2 * edges.size());
 	result.vertices = vertices;
 	result.edges = edges;
 
@@ -56,6 +67,24 @@ MeshBuffer MeshBuffer::fromTriangles(std::vector<Vertex> vertices, std::vector<g
 	result.triangles = triangles;
 
 	return result;
+}
+
+void MeshBuffer::load(std::vector<glm::vec3> positions, std::vector<int> indices) {
+	glBindBuffer(GL_ARRAY_BUFFER, vbo);
+	glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(positions.size() * sizeof(glm::vec3)), positions.data(), GL_STATIC_DRAW);
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(indices.size() * sizeof(decltype(indices)::value_type)), indices.data(), GL_STATIC_DRAW);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+
+	glBindVertexArray(vao);
+	glBindBuffer(GL_ARRAY_BUFFER, vbo);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+	glEnableVertexAttribArray(0);
+	glBindVertexArray(0);
+
+	indices_amount = static_cast<GLsizei>(indices.size());
 }
 
 void MeshBuffer::cleanUp() const {

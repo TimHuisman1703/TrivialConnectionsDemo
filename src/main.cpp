@@ -15,6 +15,7 @@ DISABLE_WARNINGS_PUSH()
 #include <stb/stb_image.h>
 DISABLE_WARNINGS_POP()
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstdlib> // EXIT_FAILURE
 #include <framework/mesh.h>
@@ -28,11 +29,12 @@ DISABLE_WARNINGS_POP()
 #include <numeric>
 #include <optional>
 #include <span>
+#include <stack>
 #include <vector>
-#include <array>
 
 #include "buffer.h"
 #include "mesh_ex.h"
+#include "tree_cotree.h"
 
 // Configuration
 const int WIDTH = 1200;
@@ -43,6 +45,15 @@ struct Texture {
     int height;
     int channels;
     stbi_uc* texture_data;
+};
+
+enum Stage {
+    CHOOSE_MESH,
+    VERTEX_K,
+    TREE_COTREE,
+    TEST_CYCLES,
+
+    STAGE_NR_ITEMS
 };
 
 std::tuple<MeshBuffer, MeshBuffer, MeshEx> loadMainMesh(std::string name) {
@@ -127,12 +138,10 @@ int main(int argc, char** argv)
     trackball.setCamera(look_at, rotations, dist);
 
     // Create buffers
-    GLuint vbo_dual_edges;
-    glGenBuffers(1, &vbo_dual_edges);
-    GLuint ibo_dual_edges;
-    glGenBuffers(1, &ibo_dual_edges);
-    GLuint vao_dual_edges;
-    glGenVertexArrays(1, &vao_dual_edges);
+    MeshBuffer mesh_buffer_dual_edges = MeshBuffer::empty();
+    MeshBuffer mesh_buffer_tree = MeshBuffer::empty();
+    MeshBuffer mesh_buffer_cotree = MeshBuffer::empty();
+    MeshBuffer mesh_buffer_noncon = MeshBuffer::empty();
 
     // Build shaders
     const Shader normal_shader = ShaderBuilder()
@@ -149,7 +158,7 @@ int main(int argc, char** argv)
         .build();
 
     std::tuple<MeshBuffer, MeshBuffer, MeshEx> mesh_data = loadMainMesh("genus_1");
-    MeshBuffer mesh_buffer = std::get<0>(mesh_data);
+    MeshBuffer mesh_buffer_object = std::get<0>(mesh_data);
     MeshBuffer mesh_buffer_wireframe = std::get<1>(mesh_data);
     MeshEx mesh_ex = std::get<2>(mesh_data);
 
@@ -159,15 +168,18 @@ int main(int argc, char** argv)
 
     // Parameters
     bool show_imgui = true;
-    int stage = 0;
+    Stage stage = CHOOSE_MESH;
     int selected_vertex_idx = 0;
-    std::vector<bool> dual_edge_selected;
 
-    // Render data
-    bool reload_dual_edges = true;
-    std::vector<glm::vec3> positions_dual_edges;
-    std::vector<int> indices_dual_edges;
-    std::vector<int> path_dual_edges;
+    // Tree-cotree data
+    std::vector<int> tree_assignment;
+
+    // Cycle data
+    std::vector<bool> dual_edges_selected;
+    bool dual_edges_reload = true;
+    std::vector<int> dual_edges_path;
+    std::vector<bool> dual_edges_vertex_partition;
+    double curvature_partition = 0.0;
 
     // Handle key press
     window.registerKeyCallback([&](int key, int scancode, int action, int mods) {
@@ -184,20 +196,20 @@ int main(int argc, char** argv)
         if (!window.isKeyPressed(GLFW_KEY_LEFT_SHIFT))
             return;
 
-        if (stage == 1) {
+        if (stage == VERTEX_K) {
             if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
                 const auto opt_world_point = getWorldPositionOfPixel(trackball, window.getCursorPixel());
                 if (opt_world_point)
                     selected_vertex_idx = getClosestVertexIndex(mesh_ex, *opt_world_point);
                 return;
             }
-        } else if (stage == 2) {
+        } else if (stage == TEST_CYCLES) {
             if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
                 const auto opt_world_point = getWorldPositionOfPixel(trackball, window.getCursorPixel());
                 if (opt_world_point) {
                     int closest_edge_index = getClosestEdgeIndex(mesh_ex, *opt_world_point);
-                    dual_edge_selected[closest_edge_index] = !dual_edge_selected[closest_edge_index];
-                    reload_dual_edges = true;
+                    dual_edges_selected[closest_edge_index] = !dual_edges_selected[closest_edge_index];
+                    dual_edges_reload = true;
                 }
                 return;
             }
@@ -208,15 +220,17 @@ int main(int argc, char** argv)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_BLEND);
 
-    const std::array<std::string, 3> stage_names{
+    const std::array<std::string, 4> stage_names{
         "Choosing Mesh",
         "Setting Singularities",
+        "Tree-Cotree Decomposition",
         "Test Cycles",
     };
-    const std::array<std::string, 3> stage_descriptions{
+    const std::array<std::string, 4> stage_descriptions{
         "Select a mesh to construct a\n  vector field on.",
         "Set the singularities of each\n  vertex.\nSelect a vertex by holding\n  SHIFT and clicking on the\n  mesh.\nIncrease or decrease its index\n  in the GUI.",
-        "Test Cycles",
+        "Tree-Cotree Decomposition (TODO)",
+        "Test Cycles (TODO)",
     };
 
     while (!window.shouldClose()) {
@@ -230,17 +244,11 @@ int main(int argc, char** argv)
         int euler_mesh_characteristic = mesh_ex.vertices.size() - mesh_ex.edges.size() + mesh_ex.faces.size();
 
         // Stage checks
-        bool prev_enabled = true;
-        bool next_enabled = true;
-        if (stage == 0) {
-            prev_enabled = false;
-        }
-        else if (stage == 1) {
+        bool prev_enabled = stage > 0;
+        bool next_enabled = stage < STAGE_NR_ITEMS - 1;
+        if (stage == VERTEX_K) {
             if (total_k != euler_mesh_characteristic)
                 next_enabled = false;
-        }
-        else if (stage == 2) {
-            next_enabled = false;
         }
 
         // Draw GUI
@@ -254,24 +262,97 @@ int main(int argc, char** argv)
 
             if (ImGui::Button(prev_enabled ? "Previous" : "##", ImVec2(halfWidth, 19))) {
                 if (prev_enabled) {
-                    stage--;
+                    stage = static_cast<Stage>(stage - 1);
 
                     selected_vertex_idx = -1;
-                    reload_dual_edges = true;
+                    dual_edges_reload = true;
                 }
             }
             ImGui::SameLine();
             if (ImGui::Button(next_enabled ? "Next" : "##", ImVec2(halfWidth, 19))) {
                 if (next_enabled) {
-                    stage++;
+                    stage = static_cast<Stage>(stage + 1);
 
                     selected_vertex_idx = -1;
-                    reload_dual_edges = true;
+                    dual_edges_reload = true;
 
-                    if (stage == 2) {
-                        dual_edge_selected = {};
+                    if (stage == TREE_COTREE) {
+                        tree_assignment = treeCotreeDecompose(mesh_ex);
+                        std::vector<std::vector<int>> paths = findNoncontractibleCycles(mesh_ex, tree_assignment);
+
+                        // Create tree data for rendering
+                        std::vector<glm::vec3> tree_positions;
+                        std::vector<int> tree_indices;
+                        for (int e_idx = 0; e_idx < mesh_ex.edges.size(); e_idx++) {
+                            if (tree_assignment[e_idx] == 1) {
+                                const EdgeEx& e = mesh_ex.edges[e_idx];
+
+                                glm::vec3 v_a_pos = mesh_ex.vertices[e.vertices[0]].position;
+                                glm::vec3 v_b_pos = mesh_ex.vertices[e.vertices[1]].position;
+
+                                tree_positions.push_back(v_a_pos);
+                                tree_positions.push_back(v_b_pos);
+
+                                tree_indices.push_back(tree_positions.size() - 2);
+                                tree_indices.push_back(tree_positions.size() - 1);
+                            }
+                        }
+                        mesh_buffer_tree.load(tree_positions, tree_indices);
+
+                        // Create cotree data for rendering
+                        std::vector<glm::vec3> cotree_positions;
+                        std::vector<int> cotree_indices;
+                        for (int e_idx = 0; e_idx < mesh_ex.edges.size(); e_idx++) {
+                            if (tree_assignment[e_idx] == -1) {
+                                const EdgeEx& e = mesh_ex.edges[e_idx];
+
+                                glm::vec3 e_center = 0.5f * (mesh_ex.vertices[e.vertices[0]].position + mesh_ex.vertices[e.vertices[1]].position);
+                                glm::vec3 f_a_center = mesh_ex.centerOfMass(e.faces[0]);
+                                glm::vec3 f_b_center = mesh_ex.centerOfMass(e.faces[1]);
+
+                                cotree_positions.push_back(f_a_center);
+                                cotree_positions.push_back(e_center);
+                                cotree_positions.push_back(f_b_center);
+
+                                cotree_indices.push_back(cotree_positions.size() - 3);
+                                cotree_indices.push_back(cotree_positions.size() - 2);
+                                cotree_indices.push_back(cotree_positions.size() - 2);
+                                cotree_indices.push_back(cotree_positions.size() - 1);
+                            }
+                        }
+                        mesh_buffer_cotree.load(cotree_positions, cotree_indices);
+
+                        // Create noncon-cycle data for rendering
+                        std::vector<glm::vec3> noncon_positions;
+                        std::vector<int> noncon_indices;
+                        for (std::vector<int>& path : paths) {
+                            for (int e_idx : path) {
+                                const EdgeEx& e = mesh_ex.edges[e_idx];
+
+                                glm::vec3 e_center = 0.5f * (mesh_ex.vertices[e.vertices[0]].position + mesh_ex.vertices[e.vertices[1]].position);
+                                glm::vec3 f_a_center = mesh_ex.centerOfMass(e.faces[0]);
+                                glm::vec3 f_b_center = mesh_ex.centerOfMass(e.faces[1]);
+
+                                noncon_positions.push_back(f_a_center);
+                                noncon_positions.push_back(e_center);
+                                noncon_positions.push_back(f_b_center);
+
+                                noncon_indices.push_back(noncon_positions.size() - 3);
+                                noncon_indices.push_back(noncon_positions.size() - 2);
+                                noncon_indices.push_back(noncon_positions.size() - 2);
+                                noncon_indices.push_back(noncon_positions.size() - 1);
+                            }
+                        }
+                        mesh_buffer_noncon.load(noncon_positions, noncon_indices);
+                    }
+
+                    if (stage == TEST_CYCLES) {
+                        dual_edges_selected = {};
                         for (int e_idx = 0; e_idx < mesh_ex.edges.size(); e_idx++)
-                            dual_edge_selected.push_back(false);
+                            dual_edges_selected.push_back(false);
+                        dual_edges_vertex_partition = {};
+                        for (int v_idx = 0; v_idx < mesh_ex.vertices.size(); v_idx++)
+                            dual_edges_vertex_partition.push_back(false);
                     }
                 }
             }
@@ -280,34 +361,35 @@ int main(int argc, char** argv)
             ImGui::Text(stage_descriptions[stage].c_str());
             ImGui::Separator();
 
-            if (stage == 0) {
+            if (stage == CHOOSE_MESH) {
                 if (ImGui::Button("Icosphere (g = 0)", ImVec2(width, 19))) {
                     std::tuple<MeshBuffer, MeshBuffer, MeshEx> mesh_data = loadMainMesh("genus_0");
-                    mesh_buffer = std::get<0>(mesh_data);
+                    mesh_buffer_object = std::get<0>(mesh_data);
                     mesh_buffer_wireframe = std::get<1>(mesh_data);
                     mesh_ex = std::get<2>(mesh_data);
                 }
 
                 if (ImGui::Button("Thorus (g = 1)", ImVec2(width, 19))) {
                     std::tuple<MeshBuffer, MeshBuffer, MeshEx> mesh_data = loadMainMesh("genus_1");
-                    mesh_buffer = std::get<0>(mesh_data);
+                    mesh_buffer_object = std::get<0>(mesh_data);
                     mesh_buffer_wireframe = std::get<1>(mesh_data);
                     mesh_ex = std::get<2>(mesh_data);
                 }
 
                 if (ImGui::Button("Bunny (g = 0)", ImVec2(width, 19))) {
                     std::tuple<MeshBuffer, MeshBuffer, MeshEx> mesh_data = loadMainMesh("bunny");
-                    mesh_buffer = std::get<0>(mesh_data);
+                    mesh_buffer_object = std::get<0>(mesh_data);
                     mesh_buffer_wireframe = std::get<1>(mesh_data);
                     mesh_ex = std::get<2>(mesh_data);
                 }
-            } else if (stage == 1) {
+            } else if (stage == VERTEX_K) {
                 if (selected_vertex_idx > -1) {
                     ImGui::Text("Vertex Selected: #%i", selected_vertex_idx);
                     ImGui::InputInt("k", &mesh_ex.vertices[selected_vertex_idx].k);
                 }
                 else {
                     ImGui::Text("Vertex Selected: None");
+                    ImGui::NewLine();
                 }
 
                 ImGui::Separator();
@@ -320,10 +402,11 @@ int main(int argc, char** argv)
                     ImGui::Text("  sum(k) = %i != % i", total_k, euler_mesh_characteristic);
                 }
             }
-            else if (stage == 2) {
-                if (path_dual_edges.size() > 0) {
+            else if (stage == TEST_CYCLES) {
+                if (!dual_edges_path.empty()) {
                     ImGui::TextColored(ImVec4(0.2, 1.0, 0.4, 1.0), "Cycle complete");
-                    ImGui::Text("  #edges = %i", path_dual_edges.size());
+                    ImGui::Text("  #edges = %i", dual_edges_path.size());
+                    ImGui::Text("  defect = %f", curvature_partition);
                 }
                 else {
                     ImGui::TextColored(ImVec4(1.0, 0.4, 0.2, 1.0), "Cycle incomplete");
@@ -335,17 +418,17 @@ int main(int argc, char** argv)
         }
 
         // Logic
-        if (stage == 2) {
-            if (reload_dual_edges) {
+        if (stage == TEST_CYCLES) {
+            if (dual_edges_reload) {
                 // Trace cycle
-                path_dual_edges = {};
+                dual_edges_path = {};
                 std::vector<std::vector<int>> edges_per_face(mesh_ex.faces.size());
 
                 int f_start_idx = -1;
                 int e_start_idx = -1;
                 int expected_length = 0;
                 for (int e_idx = 0; e_idx < mesh_ex.edges.size(); e_idx++) {
-                    if (dual_edge_selected[e_idx]) {
+                    if (dual_edges_selected[e_idx]) {
                         const EdgeEx& e = mesh_ex.edges[e_idx];
                         edges_per_face[e.faces[0]].push_back(e_idx);
                         edges_per_face[e.faces[1]].push_back(e_idx);
@@ -359,7 +442,7 @@ int main(int argc, char** argv)
                 }
 
                 if (f_start_idx != -1) {
-                    path_dual_edges = { e_start_idx };
+                    dual_edges_path = { e_start_idx };
 
                     int f_curr_idx = mesh_ex.otherFace(e_start_idx, f_start_idx);
                     int e_curr_idx = e_start_idx;
@@ -367,7 +450,7 @@ int main(int argc, char** argv)
                         std::vector<int> edges = edges_per_face[f_curr_idx];
 
                         if (edges.size() != 2) {
-                            path_dual_edges = {};
+                            dual_edges_path = {};
                             break;
                         }
 
@@ -377,12 +460,76 @@ int main(int argc, char** argv)
                             e_curr_idx = edges[1];
 
                         f_curr_idx = mesh_ex.otherFace(e_curr_idx, f_curr_idx);
-                        path_dual_edges.push_back(e_curr_idx);
+                        dual_edges_path.push_back(e_curr_idx);
                     }
 
-                    if (path_dual_edges.size() != expected_length)
-                        path_dual_edges = {};
+                    if (dual_edges_path.size() != expected_length)
+                        dual_edges_path = {};
+
+                    std::fill(dual_edges_vertex_partition.begin(), dual_edges_vertex_partition.end(), false);
+                    if (!dual_edges_path.empty()) {
+                        int v_start_idx = mesh_ex.edges[e_curr_idx].vertices[0];
+
+                        std::stack<int> stack;
+                        stack.push(v_start_idx);
+                        int partition_size = 0;
+                        while (!stack.empty()) {
+                            int v_curr_idx = stack.top();
+                            stack.pop();
+
+                            if (dual_edges_vertex_partition[v_curr_idx])
+                                continue;
+                            dual_edges_vertex_partition[v_curr_idx] = true;
+                            partition_size++;
+
+                            for (int e_idx : mesh_ex.vertices[v_curr_idx].edges) {
+                                if (!dual_edges_selected[e_idx])
+                                    stack.push(mesh_ex.otherVertex(e_idx, v_curr_idx));
+                            }
+                        }
+
+                        if (partition_size == dual_edges_vertex_partition.size()) {
+                            // The cycle is non-contractible
+                        }
+
+                        if (2 * partition_size > dual_edges_vertex_partition.size()) {
+                            for (int v_idx = 0; v_idx < dual_edges_vertex_partition.size(); v_idx++)
+                                dual_edges_vertex_partition[v_idx] = !dual_edges_vertex_partition[v_idx];
+                        }
+
+                        curvature_partition = 0.0;
+                        for (int v_idx = 0; v_idx < mesh_ex.vertices.size(); v_idx++) {
+                            if (dual_edges_vertex_partition[v_idx])
+                                curvature_partition += mesh_ex.defectAroundVertex(v_idx);
+                        }
+                    }
                 }
+
+                // Create cycle data for rendering
+                std::vector<glm::vec3> dual_edges_positions;
+                std::vector<int> dual_edges_indices;
+                for (int e_idx = 0; e_idx < mesh_ex.edges.size(); e_idx++) {
+                    if (dual_edges_selected[e_idx]) {
+                        const EdgeEx& e = mesh_ex.edges[e_idx];
+
+                        glm::vec3 e_center = 0.5f * (mesh_ex.vertices[e.vertices[0]].position + mesh_ex.vertices[e.vertices[1]].position);
+                        glm::vec3 f_a_center = mesh_ex.centerOfMass(e.faces[0]);
+                        glm::vec3 f_b_center = mesh_ex.centerOfMass(e.faces[1]);
+
+                        dual_edges_positions.push_back(f_a_center);
+                        dual_edges_positions.push_back(e_center);
+                        dual_edges_positions.push_back(f_b_center);
+
+                        dual_edges_indices.push_back(dual_edges_positions.size() - 3);
+                        dual_edges_indices.push_back(dual_edges_positions.size() - 2);
+                        dual_edges_indices.push_back(dual_edges_positions.size() - 2);
+                        dual_edges_indices.push_back(dual_edges_positions.size() - 1);
+                    }
+                }
+
+                mesh_buffer_dual_edges.load(dual_edges_positions, dual_edges_indices);
+
+                dual_edges_reload = false;
             }
         }
 
@@ -398,184 +545,199 @@ int main(int argc, char** argv)
         const glm::mat4 projection = trackball.projectionMatrix();
         const glm::mat4 mvp = projection * view * model;
 
-        // Draw mesh
-        normal_shader.bind();
-        glUniformMatrix4fv(normal_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
+        {
+            // Draw mesh
+            normal_shader.bind();
+            glUniformMatrix4fv(normal_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
 
-        glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer.vbo);
-        glBindVertexArray(mesh_buffer.vao);
-        glVertexAttribPointer(normal_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
-        glVertexAttribPointer(normal_shader.getAttributeLocation("normal"), 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, normal));
-        glDrawElements(GL_TRIANGLES, mesh_buffer.indices_amount, GL_UNSIGNED_INT, nullptr);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        glBindVertexArray(0);
+            glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_object.vbo);
+            glBindVertexArray(mesh_buffer_object.vao);
+            glVertexAttribPointer(normal_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
+            glVertexAttribPointer(normal_shader.getAttributeLocation("normal"), 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, normal));
+            glDrawElements(GL_TRIANGLES, mesh_buffer_object.indices_amount, GL_UNSIGNED_INT, nullptr);
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+            glBindVertexArray(0);
+        }
 
-        // Draw wireframe background
-        glDisable(GL_DEPTH_TEST);
-        glDepthMask(0.0f);
-
-        glm::vec4 dark_grey_transparent{ 0.3f, 0.3f, 0.3f, 0.2f };
-        wireframe_shader.bind();
-        glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
-        glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(dark_grey_transparent));
-        glLineWidth(1);
-
-        glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_wireframe.vbo);
-        glBindVertexArray(mesh_buffer_wireframe.vao);
-        glVertexAttribPointer(wireframe_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
-        glDrawElements(GL_LINES, mesh_buffer_wireframe.indices_amount, GL_UNSIGNED_INT, nullptr);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        glBindVertexArray(0);
-
-        glEnable(GL_DEPTH_TEST);
-
-        // Draw wireframe
-        glm::vec4 dark_grey{ 0.3f, 0.3f, 0.3f, 1.0f };
-        wireframe_shader.bind();
-        glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
-        glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(dark_grey));
-        glLineWidth(2);
-
-        glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_wireframe.vbo);
-        glBindVertexArray(mesh_buffer_wireframe.vao);
-        glVertexAttribPointer(wireframe_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
-        glDrawElements(GL_LINES, mesh_buffer_wireframe.indices_amount, GL_UNSIGNED_INT, nullptr);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        glBindVertexArray(0);
-
-        glDepthMask(1.0f);
-
-        // Set vertex uniform data for instanced singularity drawing
         std::vector<SingularityUniform> singularity_uniforms = {};
-        for (int v_idx = 0; v_idx < mesh_ex.vertices.size(); v_idx++)
-            singularity_uniforms.push_back(SingularityUniform::fromVertexEx(mesh_ex, v_idx));
-        int singularity_amount = singularity_uniforms.size();
-
+        int singularity_amount = 0;
         GLuint singularity_ubo;
-        glGenBuffers(1, &singularity_ubo);
-        glBindBuffer(GL_UNIFORM_BUFFER, singularity_ubo);
-        glBufferData(GL_UNIFORM_BUFFER, singularity_amount * sizeof(SingularityUniform) + 16, NULL, GL_DYNAMIC_DRAW);
-        glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(int), &singularity_amount);
-        glBufferSubData(GL_UNIFORM_BUFFER, 16, singularity_amount * sizeof(SingularityUniform), singularity_uniforms.data());
-        glBindBuffer(GL_UNIFORM_BUFFER, 0);
+        if (stage >= VERTEX_K) {
+            // Set vertex uniform data for instanced singularity drawing
+            for (int v_idx = 0; v_idx < mesh_ex.vertices.size(); v_idx++)
+                singularity_uniforms.push_back(SingularityUniform::fromVertexEx(mesh_ex, v_idx));
+            singularity_amount = singularity_uniforms.size();
 
-        // Draw background singularity vertices
-        glDisable(GL_DEPTH_TEST);
+            glGenBuffers(1, &singularity_ubo);
+            glBindBuffer(GL_UNIFORM_BUFFER, singularity_ubo);
+            glBufferData(GL_UNIFORM_BUFFER, singularity_amount * sizeof(SingularityUniform) + 16, NULL, GL_DYNAMIC_DRAW);
+            glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(int), &singularity_amount);
+            glBufferSubData(GL_UNIFORM_BUFFER, 16, singularity_amount * sizeof(SingularityUniform), singularity_uniforms.data());
+            glBindBuffer(GL_UNIFORM_BUFFER, 0);
+        }
 
-        singularity_shader.bind();
-        glUniformMatrix4fv(singularity_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
-        glUniform1i(singularity_shader.getUniformLocation("selected_vertex_idx"), selected_vertex_idx);
-        glUniform1i(singularity_shader.getUniformLocation("stage"), stage);
-        glUniform1i(singularity_shader.getUniformLocation("transparent"), true);
-        singularity_shader.bindUniformBlock("vertex_buffer", 0, singularity_ubo);
+        // Draw background
+        {
+            glDisable(GL_DEPTH_TEST);
+            glDepthMask(0.0f);
 
-        glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_singularity.vbo);
-        glBindVertexArray(mesh_buffer_singularity.vao);
-        glVertexAttribPointer(singularity_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
-        glDrawElementsInstanced(GL_TRIANGLES, mesh_buffer_singularity.indices_amount, GL_UNSIGNED_INT, 0, singularity_amount);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        glBindVertexArray(0);
+            // Draw wireframe background
+            glm::vec4 dark_grey_transparent{ 0.3f, 0.3f, 0.3f, 0.2f };
+            wireframe_shader.bind();
+            glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
+            glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(dark_grey_transparent));
+            glLineWidth(1);
 
-        glEnable(GL_DEPTH_TEST);
+            glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_wireframe.vbo);
+            glBindVertexArray(mesh_buffer_wireframe.vao);
+            glVertexAttribPointer(wireframe_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
+            glDrawElements(GL_LINES, mesh_buffer_wireframe.indices_amount, GL_UNSIGNED_INT, nullptr);
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+            glBindVertexArray(0);
 
-        // Draw singularity vertices
-        singularity_shader.bind();
-        glUniformMatrix4fv(singularity_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
-        glUniform1i(singularity_shader.getUniformLocation("selected_vertex_idx"), selected_vertex_idx);
-        glUniform1i(singularity_shader.getUniformLocation("stage"), stage);
-        glUniform1i(singularity_shader.getUniformLocation("transparent"), false);
-        singularity_shader.bindUniformBlock("vertex_buffer", 0, singularity_ubo);
+            if (stage >= VERTEX_K) {
+                // Draw background singularity vertices
+                singularity_shader.bind();
+                glUniformMatrix4fv(singularity_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
+                glUniform1i(singularity_shader.getUniformLocation("selected_vertex_idx"), selected_vertex_idx);
+                glUniform1i(singularity_shader.getUniformLocation("stage"), stage);
+                glUniform1i(singularity_shader.getUniformLocation("transparent"), true);
+                singularity_shader.bindUniformBlock("vertex_buffer", 0, singularity_ubo);
 
-        glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_singularity.vbo);
-        glBindVertexArray(mesh_buffer_singularity.vao);
-        glVertexAttribPointer(singularity_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
-        glDrawElementsInstanced(GL_TRIANGLES, mesh_buffer_singularity.indices_amount, GL_UNSIGNED_INT, 0, singularity_amount);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        glBindVertexArray(0);
-
-        if (stage == 2) {
-            if (reload_dual_edges) {
-                // Create cycle data
-                positions_dual_edges = {};
-                indices_dual_edges = {};
-
-                for (int e_idx = 0; e_idx < mesh_ex.edges.size(); e_idx++) {
-                    if (dual_edge_selected[e_idx]) {
-                        const EdgeEx& e = mesh_ex.edges[e_idx];
-
-                        glm::vec3 e_center = 0.5f * (mesh_ex.vertices[e.vertices[0]].position + mesh_ex.vertices[e.vertices[1]].position);
-                        glm::vec3 f_a_center = mesh_ex.centerOfMass(e.faces[0]);
-                        glm::vec3 f_b_center = mesh_ex.centerOfMass(e.faces[1]);
-
-                        positions_dual_edges.push_back(f_a_center);
-                        positions_dual_edges.push_back(e_center);
-                        positions_dual_edges.push_back(f_b_center);
-
-                        indices_dual_edges.push_back(positions_dual_edges.size() - 3);
-                        indices_dual_edges.push_back(positions_dual_edges.size() - 2);
-                        indices_dual_edges.push_back(positions_dual_edges.size() - 2);
-                        indices_dual_edges.push_back(positions_dual_edges.size() - 1);
-                    }
-                }
-
-                glBindBuffer(GL_ARRAY_BUFFER, vbo_dual_edges);
-                glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(positions_dual_edges.size() * sizeof(glm::vec3)), positions_dual_edges.data(), GL_STATIC_DRAW);
+                glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_singularity.vbo);
+                glBindVertexArray(mesh_buffer_singularity.vao);
+                glVertexAttribPointer(singularity_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
+                glDrawElementsInstanced(GL_TRIANGLES, mesh_buffer_singularity.indices_amount, GL_UNSIGNED_INT, 0, singularity_amount);
                 glBindBuffer(GL_ARRAY_BUFFER, 0);
-
-                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_dual_edges);
-                glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(indices_dual_edges.size() * sizeof(decltype(indices_dual_edges)::value_type)), indices_dual_edges.data(), GL_STATIC_DRAW);
-                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
-
-                glBindVertexArray(vao_dual_edges);
-                glBindBuffer(GL_ARRAY_BUFFER, vbo_dual_edges);
-                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo_dual_edges);
-                glEnableVertexAttribArray(0);
                 glBindVertexArray(0);
-
-                reload_dual_edges = false;
             }
 
             // Draw cycle background
-            glDisable(GL_DEPTH_TEST);
+            if (stage == TEST_CYCLES) {
+                wireframe_shader.bind();
+                glm::vec4 red_transparent{ 1.0f, 0.2f, 0.2f, 0.35f };
+                glm::vec4 green_transparent{ 0.2f, 1.0f, 0.2f, 0.35f };
+                glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
+                glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(dual_edges_path.empty() ? red_transparent : green_transparent));
+                glLineWidth(5);
 
-            wireframe_shader.bind();
-            glm::vec4 red_transparent{ 1.0f, 0.2f, 0.2f, 0.35f };
-            glm::vec4 green_transparent{ 0.2f, 1.0f, 0.2f, 0.35f };
-            glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
-            glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(path_dual_edges.empty() ? red_transparent : green_transparent));
-            glLineWidth(5);
-
-            glBindBuffer(GL_ARRAY_BUFFER, vbo_dual_edges);
-            glBindVertexArray(vao_dual_edges);
-            glVertexAttribPointer(wireframe_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
-            glDrawElements(GL_LINES, static_cast<GLsizei>(3 * indices_dual_edges.size()), GL_UNSIGNED_INT, 0);
-            glBindBuffer(GL_ARRAY_BUFFER, 0);
-            glBindVertexArray(0);
+                glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_dual_edges.vbo);
+                glBindVertexArray(mesh_buffer_dual_edges.vao);
+                glVertexAttribPointer(wireframe_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+                glDrawElements(GL_LINES, mesh_buffer_dual_edges.indices_amount, GL_UNSIGNED_INT, 0);
+                glBindBuffer(GL_ARRAY_BUFFER, 0);
+                glBindVertexArray(0);
+            }
 
             glEnable(GL_DEPTH_TEST);
+            glDepthMask(1.0f);
+        }
 
-            // Draw cycle
+        // Draw foreground
+        {
+            // Draw wireframe
+            glm::vec4 dark_grey{ 0.3f, 0.3f, 0.3f, 1.0f };
             wireframe_shader.bind();
-            glm::vec4 red{ 1.0f, 0.2f, 0.2f, 1.0f };
-            glm::vec4 green{ 0.2f, 1.0f, 0.2f, 1.0f };
             glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
-            glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(path_dual_edges.empty() ? red : green));
-            glLineWidth(12);
+            glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(dark_grey));
+            glLineWidth(2);
 
-            glBindBuffer(GL_ARRAY_BUFFER, vbo_dual_edges);
-            glBindVertexArray(vao_dual_edges);
-            glVertexAttribPointer(wireframe_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
-            glDrawElements(GL_LINES, static_cast<GLsizei>(3 * indices_dual_edges.size()), GL_UNSIGNED_INT, 0);
+            glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_wireframe.vbo);
+            glBindVertexArray(mesh_buffer_wireframe.vao);
+            glVertexAttribPointer(wireframe_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
+            glDrawElements(GL_LINES, mesh_buffer_wireframe.indices_amount, GL_UNSIGNED_INT, nullptr);
             glBindBuffer(GL_ARRAY_BUFFER, 0);
             glBindVertexArray(0);
+
+            if (stage >= VERTEX_K) {
+                // Draw singularity vertices
+                singularity_shader.bind();
+                glUniformMatrix4fv(singularity_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
+                glUniform1i(singularity_shader.getUniformLocation("selected_vertex_idx"), selected_vertex_idx);
+                glUniform1i(singularity_shader.getUniformLocation("stage"), stage);
+                glUniform1i(singularity_shader.getUniformLocation("transparent"), false);
+                singularity_shader.bindUniformBlock("vertex_buffer", 0, singularity_ubo);
+
+                glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_singularity.vbo);
+                glBindVertexArray(mesh_buffer_singularity.vao);
+                glVertexAttribPointer(singularity_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
+                glDrawElementsInstanced(GL_TRIANGLES, mesh_buffer_singularity.indices_amount, GL_UNSIGNED_INT, 0, singularity_amount);
+                glBindBuffer(GL_ARRAY_BUFFER, 0);
+                glBindVertexArray(0);
+            }
+
+            if (stage == TREE_COTREE) {
+                // Draw noncon-cycles
+                wireframe_shader.bind();
+                glm::vec4 green{ 0.2f, 1.0f, 0.2f, 1.0f };
+                glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
+                glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(green));
+                glLineWidth(12);
+
+                glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_noncon.vbo);
+                glBindVertexArray(mesh_buffer_noncon.vao);
+                glVertexAttribPointer(wireframe_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+                glDrawElements(GL_LINES, mesh_buffer_noncon.indices_amount, GL_UNSIGNED_INT, 0);
+                glBindBuffer(GL_ARRAY_BUFFER, 0);
+                glBindVertexArray(0);
+
+                // Draw tree
+                wireframe_shader.bind();
+                glm::vec4 orange{ 1.0f, 0.4f, 0.2f, 1.0f };
+                glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
+                glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(orange));
+                glLineWidth(8);
+
+                glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_tree.vbo);
+                glBindVertexArray(mesh_buffer_tree.vao);
+                glVertexAttribPointer(wireframe_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+                glDrawElements(GL_LINES, mesh_buffer_tree.indices_amount, GL_UNSIGNED_INT, 0);
+                glBindBuffer(GL_ARRAY_BUFFER, 0);
+                glBindVertexArray(0);
+
+                // Draw cotree
+                wireframe_shader.bind();
+                glm::vec4 blue{ 0.2f, 0.2f, 1.0f, 1.0f };
+                glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
+                glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(blue));
+                glLineWidth(8);
+
+                glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_cotree.vbo);
+                glBindVertexArray(mesh_buffer_cotree.vao);
+                glVertexAttribPointer(wireframe_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+                glDrawElements(GL_LINES, mesh_buffer_cotree.indices_amount, GL_UNSIGNED_INT, 0);
+                glBindBuffer(GL_ARRAY_BUFFER, 0);
+                glBindVertexArray(0);
+            }
+
+            if (stage == TEST_CYCLES) {
+                // Draw cycle
+                wireframe_shader.bind();
+                glm::vec4 red{ 1.0f, 0.2f, 0.2f, 1.0f };
+                glm::vec4 green{ 0.2f, 1.0f, 0.2f, 1.0f };
+                glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
+                glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(dual_edges_path.empty() ? red : green));
+                glLineWidth(12);
+
+                glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_dual_edges.vbo);
+                glBindVertexArray(mesh_buffer_dual_edges.vao);
+                glVertexAttribPointer(wireframe_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+                glDrawElements(GL_LINES, mesh_buffer_dual_edges.indices_amount, GL_UNSIGNED_INT, 0);
+                glBindBuffer(GL_ARRAY_BUFFER, 0);
+                glBindVertexArray(0);
+            }
         }
 
         window.swapBuffers();
     }
 
-    mesh_buffer.cleanUp();
+    mesh_buffer_object.cleanUp();
     mesh_buffer_wireframe.cleanUp();
     mesh_buffer_singularity.cleanUp();
+
+    mesh_buffer_tree.cleanUp();
+    mesh_buffer_cotree.cleanUp();
+    mesh_buffer_noncon.cleanUp();
 
     return 0;
 }
