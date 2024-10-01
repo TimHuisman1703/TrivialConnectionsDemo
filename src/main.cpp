@@ -294,6 +294,13 @@ int main(int argc, char** argv)
                     mesh_buffer_wireframe = std::get<1>(mesh_data);
                     mesh_ex = std::get<2>(mesh_data);
                 }
+
+                if (ImGui::Button("Bunny (g = 0)", ImVec2(width, 19))) {
+                    std::tuple<MeshBuffer, MeshBuffer, MeshEx> mesh_data = loadMainMesh("bunny");
+                    mesh_buffer = std::get<0>(mesh_data);
+                    mesh_buffer_wireframe = std::get<1>(mesh_data);
+                    mesh_ex = std::get<2>(mesh_data);
+                }
             } else if (stage == 1) {
                 if (selected_vertex_idx > -1) {
                     ImGui::Text("Vertex Selected: #%i", selected_vertex_idx);
@@ -305,12 +312,21 @@ int main(int argc, char** argv)
 
                 ImGui::Separator();
                 if (total_k == euler_mesh_characteristic) {
-                    ImGui::Text("Poincare-Hopf satisfied");
+                    ImGui::TextColored(ImVec4(0.2, 1.0, 0.4, 1.0), "Poincare-Hopf satisfied");
                     ImGui::Text("  sum(k) = %i == %i", total_k, euler_mesh_characteristic);
                 }
                 else {
-                    ImGui::TextColored(ImVec4(1, 0.4, 0.2, 1), "Poincare-Hopf not satisfied");
-                    ImGui::TextColored(ImVec4(1, 0.4, 0.2, 1), "  sum(k) = %i != %i", total_k, euler_mesh_characteristic);
+                    ImGui::TextColored(ImVec4(1, 0.4, 0.2, 1.0), "Poincare-Hopf not satisfied");
+                    ImGui::Text("  sum(k) = %i != % i", total_k, euler_mesh_characteristic);
+                }
+            }
+            else if (stage == 2) {
+                if (path_dual_edges.size() > 0) {
+                    ImGui::TextColored(ImVec4(0.2, 1.0, 0.4, 1.0), "Cycle complete");
+                    ImGui::Text("  #edges = %i", path_dual_edges.size());
+                }
+                else {
+                    ImGui::TextColored(ImVec4(1.0, 0.4, 0.2, 1.0), "Cycle incomplete");
                 }
             }
 
@@ -321,6 +337,7 @@ int main(int argc, char** argv)
         // Logic
         if (stage == 2) {
             if (reload_dual_edges) {
+                // Trace cycle
                 path_dual_edges = {};
                 std::vector<std::vector<int>> edges_per_face(mesh_ex.faces.size());
 
@@ -487,8 +504,8 @@ int main(int argc, char** argv)
                         const EdgeEx& e = mesh_ex.edges[e_idx];
 
                         glm::vec3 e_center = 0.5f * (mesh_ex.vertices[e.vertices[0]].position + mesh_ex.vertices[e.vertices[1]].position);
-                        glm::vec3 f_a_center = mesh_ex.circumcircleCenter(e.faces[0]);
-                        glm::vec3 f_b_center = mesh_ex.circumcircleCenter(e.faces[1]);
+                        glm::vec3 f_a_center = mesh_ex.centerOfMass(e.faces[0]);
+                        glm::vec3 f_b_center = mesh_ex.centerOfMass(e.faces[1]);
 
                         positions_dual_edges.push_back(f_a_center);
                         positions_dual_edges.push_back(e_center);

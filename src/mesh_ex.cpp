@@ -61,6 +61,19 @@ int MeshEx::otherVertex(int e_idx, int v_idx) const {
 		return e.vertices[0];
 }
 
+int MeshEx::otherEdge(int v_idx, int f_idx, int e_idx) const {
+	const FaceEx& f = faces[f_idx];
+
+	for (int e_new_idx : f.edges) {
+		if (e_new_idx == e_idx)
+			continue;
+
+		const EdgeEx& e_new = edges[e_new_idx];
+		if (e_new.vertices[0] == v_idx || e_new.vertices[1] == v_idx)
+			return e_new_idx;
+	}
+}
+
 int MeshEx::otherFace(int e_idx, int f_idx) const {
 	const EdgeEx& e = edges[e_idx];
 
@@ -99,9 +112,34 @@ glm::vec3 MeshEx::circumcircleCenter(int f_idx) const {
 	const FaceEx& f = faces[f_idx];
 
 	glm::vec3 a = vertices[f.vertices[0]].position;
-	glm::vec3 ac = vertexToVertex(f.vertices[0], f.vertices[2]);
 	glm::vec3 ab = vertexToVertex(f.vertices[0], f.vertices[1]);
+	glm::vec3 ac = vertexToVertex(f.vertices[0], f.vertices[2]);
 	glm::vec3 abXac = glm::cross(ab, ac);
 
 	return a + (glm::cross(abXac, ab) * glm::dot(ac, ac) + glm::cross(ac, abXac) * glm::dot(ab, ab)) / (2 * glm::dot(abXac, abXac));
+}
+
+glm::vec3 MeshEx::centerOfMass(int f_idx) const {
+	const FaceEx& f = faces[f_idx];
+
+	return (vertices[f.vertices[0]].position + vertices[f.vertices[1]].position + vertices[f.vertices[2]].position) * (1.0f / 3.0f);
+}
+
+float MeshEx::curvatureAroundVertex(int v_idx) const {
+	const VertexEx& v = vertices[v_idx];
+	int v_degree = v.edges.size();
+
+	int e_curr_idx = v.edges[0];
+	int f_curr_idx = edges[e_curr_idx].faces[0];
+
+	float curvature = 0.0;
+	for (int i = 0; i < v_degree; i++) {
+		int e_next_idx = otherEdge(v_idx, f_curr_idx, e_curr_idx);
+		curvature += angleBetweenEdges(e_curr_idx, e_next_idx);
+
+		e_curr_idx = e_next_idx;
+		f_curr_idx = otherFace(e_curr_idx, f_curr_idx);
+	}
+
+	return curvature;
 }

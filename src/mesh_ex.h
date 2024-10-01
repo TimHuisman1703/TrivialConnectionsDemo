@@ -46,9 +46,13 @@ struct MeshEx {
 	static MeshEx fromMesh(const Mesh);
 
 	int otherVertex(int e_idx, int v_idx) const;
+	int otherEdge(int v_idx, int f_idx, int e_idx) const;
 	int otherFace(int e_idx, int f_idx) const;
 
 	glm::vec3 vertexToVertex(int v_src_idx, int v_dst_idx) const;
 	float angleBetweenEdges(int e_a_idx, int e_b_idx) const;
 	glm::vec3 circumcircleCenter(int f_idx) const;
+	glm::vec3 centerOfMass(int f_idx) const;
+
+	float curvatureAroundVertex(int v_idx) const;
 };
