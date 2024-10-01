@@ -1,6 +1,6 @@
 #version 450
 
-uniform int stage;
+uniform bool draw_zero_k;
 uniform bool transparent;
 
 flat in int k;
@@ -13,7 +13,7 @@ void main() {
 
 	float alpha = transparent ? 0.35 : 1.0;
 
-	if ((stage >= 2 && k != 0) || (stage == 1 && (k != 0 || !transparent))) {
+	if (k != 0 || (draw_zero_k && !transparent)) {
 		if (k > 0) {
 			outColor = vec4(1.0, b, a, alpha);
 		} else {
