@@ -56,24 +56,6 @@ enum Stage {
 	STAGE_NR_ITEMS
 };
 
-std::tuple<MeshBuffer, MeshBuffer, MeshEx> loadMainMesh(std::string name) {
-	// Load main mesh
-	const Mesh mesh = loadMesh(std::string(RESOURCE_ROOT) + fmt::format("resources/{}.obj", name.c_str()))[0];
-	const MeshBuffer mesh_buffer = MeshBuffer::fromTriangles(mesh.vertices, mesh.triangles);
-
-	// Create extended mesh representation
-	MeshEx mesh_ex = MeshEx::fromMesh(mesh);
-	std::vector<glm::uvec2> mesh_edges = {};
-	for (const EdgeEx& e : mesh_ex.edges) {
-		mesh_edges.push_back(e.vertices);
-	}
-
-	// Create wireframe buffer
-	const MeshBuffer mesh_buffer_wireframe = MeshBuffer::fromEdges(mesh.vertices, mesh_edges);
-
-	return { mesh_buffer, mesh_buffer_wireframe, mesh_ex };
-}
-
 // Copied (and adapted) from 3DCGA Exercise Set 03
 static std::optional<glm::vec3> getWorldPositionOfPixel(const Trackball& trackball, const glm::vec2& pixel)
 {
@@ -157,10 +139,10 @@ int main(int argc, char** argv)
 		.addStage(GL_FRAGMENT_SHADER, RESOURCE_ROOT "shaders/singularity.frag")
 		.build();
 
-	std::tuple<MeshBuffer, MeshBuffer, MeshEx> mesh_data = loadMainMesh("genus_1");
-	MeshBuffer mesh_buffer_object = std::get<0>(mesh_data);
-	MeshBuffer mesh_buffer_wireframe = std::get<1>(mesh_data);
-	MeshEx mesh_ex = std::get<2>(mesh_data);
+	// Mesh data
+	MeshBuffer mesh_buffer_main;
+	MeshBuffer mesh_buffer_wireframe;
+	MeshEx mesh_ex;
 
 	// Load singularity mesh
 	const Mesh mesh_singularity = loadMesh(std::string(RESOURCE_ROOT) + "resources/singularity.obj")[0];
@@ -177,15 +159,17 @@ int main(int argc, char** argv)
 	int selected_noncon_item_idx = 0;
 	std::vector<std::string> noncon_items;
 
-	// Tree-cotree data
+	// Algorithm data
 	std::vector<int> tree_assignment;
+	std::vector<int> noncon_ks;
 
 	// Cycle data
 	std::vector<bool> dual_edges_selected;
 	bool dual_edges_reload = true;
 	std::vector<int> dual_edges_path;
 	std::vector<bool> dual_edges_vertex_partition;
-	double curvature_partition = 0.0;
+	bool is_noncon;
+	double curvature_partition;
 
 	// Handle key press
 	window.registerKeyCallback([&](int key, int scancode, int action, int mods) {
@@ -241,6 +225,111 @@ int main(int argc, char** argv)
 		"Test Cycles (TODO)",
 	};
 
+	// Method for loading new mesh
+	auto loadMainMesh = [&](std::string name) {
+		// Load main mesh
+		const Mesh mesh = loadMesh(std::string(RESOURCE_ROOT) + fmt::format("resources/{}.obj", name.c_str()))[0];
+		mesh_buffer_main = MeshBuffer::fromTriangles(mesh.vertices, mesh.triangles);
+
+		// Create extended mesh representation
+		mesh_ex = MeshEx::fromMesh(mesh);
+		std::vector<glm::uvec2> mesh_edges = {};
+		for (const EdgeEx& e : mesh_ex.edges) {
+			mesh_edges.push_back(e.vertices);
+		}
+
+		// Create wireframe buffer
+		mesh_buffer_wireframe = MeshBuffer::fromEdges(mesh.vertices, mesh_edges);
+
+		tree_assignment = treeCotreeDecompose(mesh_ex);
+		std::vector<std::vector<int>> paths = findNoncontractibleCycles(mesh_ex, tree_assignment);
+
+		// Create tree data for rendering
+		std::vector<glm::vec3> tree_positions;
+		std::vector<int> tree_indices;
+		for (int e_idx = 0; e_idx < mesh_ex.edges.size(); e_idx++) {
+			if (tree_assignment[e_idx] == 1) {
+				const EdgeEx& e = mesh_ex.edges[e_idx];
+
+				glm::vec3 v_a_pos = mesh_ex.vertices[e.vertices[0]].position;
+				glm::vec3 v_b_pos = mesh_ex.vertices[e.vertices[1]].position;
+
+				tree_positions.push_back(v_a_pos);
+				tree_positions.push_back(v_b_pos);
+
+				tree_indices.push_back(tree_positions.size() - 2);
+				tree_indices.push_back(tree_positions.size() - 1);
+			}
+		}
+		mesh_buffer_tree.load(tree_positions, tree_indices);
+
+		// Create cotree data for rendering
+		std::vector<glm::vec3> cotree_positions;
+		std::vector<int> cotree_indices;
+		for (int e_idx = 0; e_idx < mesh_ex.edges.size(); e_idx++) {
+			if (tree_assignment[e_idx] == -1) {
+				const EdgeEx& e = mesh_ex.edges[e_idx];
+
+				glm::vec3 e_center = 0.5f * (mesh_ex.vertices[e.vertices[0]].position + mesh_ex.vertices[e.vertices[1]].position);
+				glm::vec3 f_a_center = mesh_ex.centerOfMass(e.faces[0]);
+				glm::vec3 f_b_center = mesh_ex.centerOfMass(e.faces[1]);
+
+				cotree_positions.push_back(f_a_center);
+				cotree_positions.push_back(e_center);
+				cotree_positions.push_back(f_b_center);
+
+				cotree_indices.push_back(cotree_positions.size() - 3);
+				cotree_indices.push_back(cotree_positions.size() - 2);
+				cotree_indices.push_back(cotree_positions.size() - 2);
+				cotree_indices.push_back(cotree_positions.size() - 1);
+			}
+		}
+		mesh_buffer_cotree.load(cotree_positions, cotree_indices);
+
+		// Create noncon-cycle data for rendering
+		for (const MeshBuffer& mb : mesh_buffers_noncon)
+			mb.cleanUp();
+		mesh_buffers_noncon = {};
+
+		for (std::vector<int>& path : paths) {
+			MeshBuffer mesh_buffer_noncon = MeshBuffer::empty();
+			std::vector<glm::vec3> noncon_positions;
+			std::vector<int> noncon_indices;
+
+			for (int e_idx : path) {
+				const EdgeEx& e = mesh_ex.edges[e_idx];
+
+				glm::vec3 e_center = 0.5f * (mesh_ex.vertices[e.vertices[0]].position + mesh_ex.vertices[e.vertices[1]].position);
+				glm::vec3 f_a_center = mesh_ex.centerOfMass(e.faces[0]);
+				glm::vec3 f_b_center = mesh_ex.centerOfMass(e.faces[1]);
+
+				noncon_positions.push_back(f_a_center);
+				noncon_positions.push_back(e_center);
+				noncon_positions.push_back(f_b_center);
+
+				noncon_indices.push_back(noncon_positions.size() - 3);
+				noncon_indices.push_back(noncon_positions.size() - 2);
+				noncon_indices.push_back(noncon_positions.size() - 2);
+				noncon_indices.push_back(noncon_positions.size() - 1);
+			}
+
+			mesh_buffer_noncon.load(noncon_positions, noncon_indices);
+			mesh_buffers_noncon.push_back(mesh_buffer_noncon);
+		}
+
+		// Initialize noncon-cycle k's
+		noncon_ks = {};
+		for (int i = 0; i < paths.size(); i++)
+			noncon_ks.push_back(0);
+
+		// Create GUI selection items
+		noncon_items = { "None" };
+		for (int i = 0; i < paths.size(); i++)
+			noncon_items.push_back(std::format("Cycle #{}", i + 1));
+	};
+
+	loadMainMesh("torus");
+
 	while (!window.shouldClose()) {
 		// Update input
 		window.updateInput();
@@ -249,12 +338,14 @@ int main(int argc, char** argv)
 		int total_k = 0;
 		for (const VertexEx& v : mesh_ex.vertices)
 			total_k += v.k;
+		for (const int k : noncon_ks)
+			total_k += k;
 		int euler_mesh_characteristic = mesh_ex.vertices.size() - mesh_ex.edges.size() + mesh_ex.faces.size();
 
 		// Stage checks
 		bool prev_enabled = stage > 0;
 		bool next_enabled = stage < STAGE_NR_ITEMS - 1;
-		if (stage == VERTEX_K) {
+		if (stage == TREE_COTREE) {
 			if (total_k != euler_mesh_characteristic)
 				next_enabled = false;
 		}
@@ -277,97 +368,13 @@ int main(int argc, char** argv)
 				}
 			}
 			ImGui::SameLine();
-			if (ImGui::Button(next_enabled ? "Next" : "##", ImVec2(halfWidth, 19))) {
+			if (ImGui::Button(next_enabled ? "Next" : "###", ImVec2(halfWidth, 19))) {
 				if (next_enabled) {
 					stage = static_cast<Stage>(stage + 1);
 
 					selected_vertex_idx = -1;
 					selected_noncon_item_idx = 0;
 					dual_edges_reload = true;
-
-					if (stage == TREE_COTREE) {
-						tree_assignment = treeCotreeDecompose(mesh_ex);
-						std::vector<std::vector<int>> paths = findNoncontractibleCycles(mesh_ex, tree_assignment);
-
-						// Create tree data for rendering
-						std::vector<glm::vec3> tree_positions;
-						std::vector<int> tree_indices;
-						for (int e_idx = 0; e_idx < mesh_ex.edges.size(); e_idx++) {
-							if (tree_assignment[e_idx] == 1) {
-								const EdgeEx& e = mesh_ex.edges[e_idx];
-
-								glm::vec3 v_a_pos = mesh_ex.vertices[e.vertices[0]].position;
-								glm::vec3 v_b_pos = mesh_ex.vertices[e.vertices[1]].position;
-
-								tree_positions.push_back(v_a_pos);
-								tree_positions.push_back(v_b_pos);
-
-								tree_indices.push_back(tree_positions.size() - 2);
-								tree_indices.push_back(tree_positions.size() - 1);
-							}
-						}
-						mesh_buffer_tree.load(tree_positions, tree_indices);
-
-						// Create cotree data for rendering
-						std::vector<glm::vec3> cotree_positions;
-						std::vector<int> cotree_indices;
-						for (int e_idx = 0; e_idx < mesh_ex.edges.size(); e_idx++) {
-							if (tree_assignment[e_idx] == -1) {
-								const EdgeEx& e = mesh_ex.edges[e_idx];
-
-								glm::vec3 e_center = 0.5f * (mesh_ex.vertices[e.vertices[0]].position + mesh_ex.vertices[e.vertices[1]].position);
-								glm::vec3 f_a_center = mesh_ex.centerOfMass(e.faces[0]);
-								glm::vec3 f_b_center = mesh_ex.centerOfMass(e.faces[1]);
-
-								cotree_positions.push_back(f_a_center);
-								cotree_positions.push_back(e_center);
-								cotree_positions.push_back(f_b_center);
-
-								cotree_indices.push_back(cotree_positions.size() - 3);
-								cotree_indices.push_back(cotree_positions.size() - 2);
-								cotree_indices.push_back(cotree_positions.size() - 2);
-								cotree_indices.push_back(cotree_positions.size() - 1);
-							}
-						}
-						mesh_buffer_cotree.load(cotree_positions, cotree_indices);
-
-						// Create noncon-cycle data for rendering
-						for (const MeshBuffer& mb : mesh_buffers_noncon)
-							mb.cleanUp();
-						mesh_buffers_noncon = {};
-
-						for (std::vector<int>& path : paths) {
-							MeshBuffer mesh_buffer_noncon = MeshBuffer::empty();
-							std::vector<glm::vec3> noncon_positions;
-							std::vector<int> noncon_indices;
-
-							for (int e_idx : path) {
-								const EdgeEx& e = mesh_ex.edges[e_idx];
-
-								glm::vec3 e_center = 0.5f * (mesh_ex.vertices[e.vertices[0]].position + mesh_ex.vertices[e.vertices[1]].position);
-								glm::vec3 f_a_center = mesh_ex.centerOfMass(e.faces[0]);
-								glm::vec3 f_b_center = mesh_ex.centerOfMass(e.faces[1]);
-
-								noncon_positions.push_back(f_a_center);
-								noncon_positions.push_back(e_center);
-								noncon_positions.push_back(f_b_center);
-
-								noncon_indices.push_back(noncon_positions.size() - 3);
-								noncon_indices.push_back(noncon_positions.size() - 2);
-								noncon_indices.push_back(noncon_positions.size() - 2);
-								noncon_indices.push_back(noncon_positions.size() - 1);
-							}
-
-							mesh_buffer_noncon.load(noncon_positions, noncon_indices);
-							mesh_buffers_noncon.push_back(mesh_buffer_noncon);
-						}
-
-						// Create GUI selection items
-						noncon_items = { "None" };
-						for (int i = 0; i < paths.size(); i++) {
-							noncon_items.push_back(std::format("Cycle #{}", i + 1));
-						}
-					}
 
 					if (stage == TEST_CYCLES) {
 						dual_edges_selected = {};
@@ -386,25 +393,19 @@ int main(int argc, char** argv)
 
 			if (stage == CHOOSE_MESH) {
 				std::string mesh_name;
-				if (ImGui::Button("Icosphere (g = 0)", ImVec2(width, 19))) {
-					mesh_name = "genus_0";
-				}
-				if (ImGui::Button("Thorus (g = 1)", ImVec2(width, 19))) {
-					mesh_name = "genus_1";
-				}
-				if (ImGui::Button("What? (g = 6)", ImVec2(width, 19))) {
-					mesh_name = "genus_6";
-				}
-				if (ImGui::Button("Bunny (g = 0)", ImVec2(width, 19))) {
+				if (ImGui::Button("Cube (g = 0)", ImVec2(width, 19)))
+					mesh_name = "cube";
+				if (ImGui::Button("Icosphere (g = 0)", ImVec2(width, 19)))
+					mesh_name = "icosphere";
+				if (ImGui::Button("Torus (g = 1)", ImVec2(width, 19)))
+					mesh_name = "torus";
+				if (ImGui::Button("What? (g = 6)", ImVec2(width, 19)))
+					mesh_name = "what";
+				if (ImGui::Button("Bunny (g = 0)", ImVec2(width, 19)))
 					mesh_name = "bunny";
-				}
 
-				if (!mesh_name.empty()) {
-					std::tuple<MeshBuffer, MeshBuffer, MeshEx> mesh_data = loadMainMesh(mesh_name);
-					mesh_buffer_object = std::get<0>(mesh_data);
-					mesh_buffer_wireframe = std::get<1>(mesh_data);
-					mesh_ex = std::get<2>(mesh_data);
-				}
+				if (!mesh_name.empty())
+					loadMainMesh(mesh_name);
 			}
 			else if (stage == VERTEX_K) {
 				if (selected_vertex_idx > -1) {
@@ -424,8 +425,9 @@ int main(int argc, char** argv)
 					ImGui::Text("  sum(k) = %i == %i = 2-2g", total_k, euler_mesh_characteristic);
 				}
 				else {
-					ImGui::TextColored(ImVec4(1, 0.4, 0.2, 1.0), "Poincare-Hopf not satisfied");
+					ImGui::TextColored(ImVec4(1.0, 0.4, 0.2, 1.0), "Poincare-Hopf not satisfied");
 					ImGui::Text("  sum(k) = %i != %i = 2-2g", total_k, euler_mesh_characteristic);
+					ImGui::TextColored(ImVec4(1.0, 1.0, 0.2, 1.0), "This can still be fixed in the\n  next step");
 				}
 			}
 			else if (stage == TREE_COTREE) {
@@ -440,11 +442,28 @@ int main(int argc, char** argv)
 					ImGui::Indent();
 					ImGui::Combo("##", &selected_noncon_item_idx, noncon_items_pointers.data(), (int)noncon_items_pointers.size());
 					ImGui::Unindent();
+					if (selected_noncon_item_idx > 0) {
+						ImGui::Text("Singularity Index (k):");
+						ImGui::Indent();
+						ImGui::InputInt("k", &noncon_ks[selected_noncon_item_idx - 1]);
+						ImGui::Unindent();
+					}
+				}
+				ImGui::Separator();
+				if (total_k == euler_mesh_characteristic) {
+					ImGui::TextColored(ImVec4(0.2, 1.0, 0.4, 1.0), "Poincare-Hopf satisfied");
+					ImGui::Text("  sum(k) = %i == %i = 2-2g", total_k, euler_mesh_characteristic);
+				}
+				else {
+					ImGui::TextColored(ImVec4(1.0, 0.4, 0.2, 1.0), "Poincare-Hopf not satisfied");
+					ImGui::Text("  sum(k) = %i != %i = 2-2g", total_k, euler_mesh_characteristic);
+					ImGui::TextColored(ImVec4(1.0, 1.0, 0.2, 1.0), "This must be fixed before\n  proceeding to the next step");
 				}
 			}
 			else if (stage == TEST_CYCLES) {
 				if (!dual_edges_path.empty()) {
 					ImGui::TextColored(ImVec4(0.2, 1.0, 0.4, 1.0), "Cycle complete");
+					ImGui::Text(is_noncon ? "  type   = noncontractible" : "  type   = contractible");
 					ImGui::Text("  #edges = %i", dual_edges_path.size());
 					ImGui::Text("  defect = %f", curvature_partition);
 				}
@@ -467,8 +486,11 @@ int main(int argc, char** argv)
 					if (clicking_edge == 2)
 						clicking_edge = 1 - 2 * dual_edges_selected[closest_edge_index];
 
-					dual_edges_selected[closest_edge_index] = (clicking_edge + 1) / 2;
-					dual_edges_reload = true;
+					bool selected = (clicking_edge + 1) / 2;
+					if (dual_edges_selected[closest_edge_index] != selected) {
+						dual_edges_selected[closest_edge_index] = selected;
+						dual_edges_reload = true;
+					}
 				}
 			}
 
@@ -541,20 +563,14 @@ int main(int argc, char** argv)
 							}
 						}
 
-						if (partition_size == dual_edges_vertex_partition.size()) {
-							// The cycle is non-contractible
-						}
+						is_noncon = partition_size == dual_edges_vertex_partition.size();
 
 						if (2 * partition_size > dual_edges_vertex_partition.size()) {
 							for (int v_idx = 0; v_idx < dual_edges_vertex_partition.size(); v_idx++)
 								dual_edges_vertex_partition[v_idx] = !dual_edges_vertex_partition[v_idx];
 						}
 
-						curvature_partition = 0.0;
-						for (int v_idx = 0; v_idx < mesh_ex.vertices.size(); v_idx++) {
-							if (dual_edges_vertex_partition[v_idx])
-								curvature_partition += mesh_ex.defectAroundVertex(v_idx);
-						}
+						curvature_partition = glm::abs(mesh_ex.angleOnPath(dual_edges_path));
 					}
 				}
 
@@ -603,11 +619,11 @@ int main(int argc, char** argv)
 			normal_shader.bind();
 			glUniformMatrix4fv(normal_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
 
-			glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_object.vbo);
-			glBindVertexArray(mesh_buffer_object.vao);
+			glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_main.vbo);
+			glBindVertexArray(mesh_buffer_main.vao);
 			glVertexAttribPointer(normal_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, position));
 			glVertexAttribPointer(normal_shader.getAttributeLocation("normal"), 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, normal));
-			glDrawElements(GL_TRIANGLES, mesh_buffer_object.indices_amount, GL_UNSIGNED_INT, nullptr);
+			glDrawElements(GL_TRIANGLES, mesh_buffer_main.indices_amount, GL_UNSIGNED_INT, nullptr);
 			glBindBuffer(GL_ARRAY_BUFFER, 0);
 			glBindVertexArray(0);
 		}
@@ -632,7 +648,7 @@ int main(int argc, char** argv)
 		// Draw background
 		{
 			glDisable(GL_DEPTH_TEST);
-			glDepthMask(0.0f);
+			glDepthMask(GL_FALSE);
 
 			// Draw wireframe background
 			glm::vec4 dark_grey_transparent{ 0.3f, 0.3f, 0.3f, 0.15f };
@@ -672,11 +688,15 @@ int main(int argc, char** argv)
 					if (selected_noncon_idx > -1) {
 						const MeshBuffer& mesh_buffer_noncon_selected = mesh_buffers_noncon[selected_noncon_idx];
 
+						int k = noncon_ks[selected_noncon_idx];
+						float a = pow(0.6, abs(k));
+						float b = pow(0.9, abs(k));
+						glm::vec4 noncon_color = k > 0 ? glm::vec4{ 1.0f, b, a, 0.35f } : glm::vec4{ a, b, 1.0f, 0.35f };
+
 						wireframe_shader.bind();
-						glm::vec4 green{ 0.2f, 1.0f, 0.2f, 0.35f };
 						glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
-						glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(green));
-						glLineWidth(12);
+						glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(noncon_color));
+						glLineWidth(20);
 
 						glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_noncon_selected.vbo);
 						glBindVertexArray(mesh_buffer_noncon_selected.vao);
@@ -706,7 +726,7 @@ int main(int argc, char** argv)
 			}
 
 			glEnable(GL_DEPTH_TEST);
-			glDepthMask(1.0f);
+			glDepthMask(GL_TRUE);
 		}
 
 		// Draw foreground
@@ -735,11 +755,15 @@ int main(int argc, char** argv)
 					if (selected_noncon_idx > -1) {
 						const MeshBuffer& mesh_buffer_noncon_selected = mesh_buffers_noncon[selected_noncon_idx];
 
+						int k = noncon_ks[selected_noncon_idx];
+						float a = pow(0.6, abs(k));
+						float b = pow(0.9, abs(k));
+						glm::vec4 noncon_color = k > 0 ? glm::vec4{ 1.0f, b, a, 1.0f } : glm::vec4{ a, b, 1.0f, 1.0f };
+
 						wireframe_shader.bind();
-						glm::vec4 green{ 0.2f, 1.0f, 0.2f, 1.0f };
 						glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
-						glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(green));
-						glLineWidth(12);
+						glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(noncon_color));
+						glLineWidth(20);
 
 						glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_noncon_selected.vbo);
 						glBindVertexArray(mesh_buffer_noncon_selected.vao);
@@ -750,15 +774,19 @@ int main(int argc, char** argv)
 					}
 
 					// Draw unselected noncon-cycles
-					glm::vec4 dark_green{ 0.1f, 0.5f, 0.1f, 1.0f };
 					for (int i = 0; i < mesh_buffers_noncon.size(); i++) {
 						if (i == selected_noncon_idx)
 							continue;
 						const MeshBuffer& mesh_buffer_noncon = mesh_buffers_noncon[i];
 
+						int k = noncon_ks[i];
+						float a = pow(0.6, abs(k));
+						float b = pow(0.9, abs(k));
+						glm::vec4 noncon_color = k > 0 ? glm::vec4{ 1.0f, b, a, 1.0f } : glm::vec4{ a, b, 1.0f, 1.0f };
+
 						wireframe_shader.bind();
 						glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
-						glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(dark_green));
+						glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(noncon_color));
 						glLineWidth(12);
 
 						glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_noncon.vbo);
@@ -773,7 +801,7 @@ int main(int argc, char** argv)
 				// Draw tree
 				if (show_tree) {
 					wireframe_shader.bind();
-					glm::vec4 orange{ 1.0f, 0.4f, 0.2f, 1.0f };
+					glm::vec4 orange{ 0.4f, 1.0f, 0.2f, 1.0f };
 					glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
 					glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(orange));
 					glLineWidth(8);
@@ -789,7 +817,7 @@ int main(int argc, char** argv)
 				if (show_cotree) {
 					// Draw cotree
 					wireframe_shader.bind();
-					glm::vec4 blue{ 0.2f, 0.2f, 1.0f, 1.0f };
+					glm::vec4 blue{ 0.8f, 0.2f, 1.0f, 1.0f };
 					glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
 					glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(blue));
 					glLineWidth(8);
@@ -838,7 +866,7 @@ int main(int argc, char** argv)
 		window.swapBuffers();
 	}
 
-	mesh_buffer_object.cleanUp();
+	mesh_buffer_main.cleanUp();
 	mesh_buffer_wireframe.cleanUp();
 	mesh_buffer_singularity.cleanUp();
 

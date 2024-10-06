@@ -26,7 +26,7 @@ struct VertexEx {
 struct EdgeEx {
 	glm::uvec2 vertices;
 
-	std::vector<int> faces = {};
+	glm::uvec2 faces = { -1, -1 };
 
 	[[nodiscard]] constexpr bool operator==(const EdgeEx&) const noexcept = default;
 };
@@ -50,12 +50,20 @@ struct MeshEx {
 	int otherEdge(int v_idx, int f_idx, int e_idx) const;
 	int otherFace(int e_idx, int f_idx) const;
 
-	int commonEdgeOfFaces(int e_a_idx, int e_b_idx) const;
+	int commonVertexOfEdges(int e_a_idx, int e_b_idx) const;
+	int commonEdgeOfVertices(int v_a_idx, int v_b_idx) const;
+	int commonEdgeOfFaces(int f_a_idx, int f_b_idx) const;
+	int commonFaceOfEdges(int e_a_idx, int e_b_idx) const;
 
 	glm::vec3 vertexToVertex(int v_src_idx, int v_dst_idx) const;
+	glm::vec3 edgeVector(int e_idx) const;
 	double angleBetweenEdges(int e_a_idx, int e_b_idx) const;
-	glm::vec3 circumcircleCenter(int f_idx) const;
+	double signedAngleBetweenEdges(int e_a_idx, int e_b_idx) const;
 	glm::vec3 centerOfMass(int f_idx) const;
+	int edgesFormChain(int e_a_idx, int e_b_idx) const;
+	int edgeOrientation(int e_a_idx, int e_b_idx) const;
 
+	glm::vec3 circumcircleCenter(int f_idx) const;
 	double defectAroundVertex(int v_idx) const;
+	double angleOnPath(std::vector<int> path);
 };

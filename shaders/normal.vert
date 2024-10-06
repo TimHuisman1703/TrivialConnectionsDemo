@@ -9,6 +9,6 @@ out vec3 fragNormal;
 
 void main() {
     gl_Position = mvp * vec4(pos - normal * 0.002, 1.0);
-
+    
     fragNormal = normal;
 }
