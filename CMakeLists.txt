@@ -8,8 +8,10 @@ elseif(PROJECT_IS_TOP_LEVEL)
 	add_subdirectory("../../../framework/" "${CMAKE_CURRENT_BINARY_DIR}/framework/")
 endif()
 
+include_directories(${CMAKE_SOURCE_DIR}/external/eigen)
+
 add_executable(SCG_Demo "src/main.cpp"
- "src/mesh_ex.h" "src/mesh_ex.cpp" "src/buffer.h" "src/buffer.cpp" "src/tree_cotree.h" "src/tree_cotree.cpp")
+ "src/mesh_ex.h" "src/mesh_ex.cpp" "src/buffer.h" "src/buffer.cpp" "src/tree_cotree.h" "src/tree_cotree.cpp" "src/solve.h" "src/solve.cpp")
 target_compile_definitions(SCG_Demo PRIVATE RESOURCE_ROOT="${CMAKE_CURRENT_LIST_DIR}/")
 target_compile_features(SCG_Demo PRIVATE cxx_std_20)
 target_link_libraries(SCG_Demo PRIVATE CGFramework)

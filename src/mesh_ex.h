@@ -65,5 +65,6 @@ struct MeshEx {
 
 	glm::vec3 circumcircleCenter(int f_idx) const;
 	double defectAroundVertex(int v_idx) const;
-	double angleOnPath(std::vector<int> path);
+	double angleOnPath(std::vector<int> path) const;
+	double angleOnPathAdjusted(std::vector<int> path, std::vector<double> adjustment_angles) const;
 };

@@ -146,7 +146,7 @@ void Trackball::mouseMoveCallback(const glm::vec2& pos)
 
         if (rotateXY) {
             // Rotate the camera around the lookat point.
-            m_rotationEulerAngles.x = std::clamp(m_rotationEulerAngles.x - glm::radians(delta.y * rotationSpeedFactor), -glm::half_pi<float>(), +glm::half_pi<float>());
+            m_rotationEulerAngles.x = m_rotationEulerAngles.x - glm::radians(delta.y * rotationSpeedFactor);
             m_rotationEulerAngles.y -= glm::radians(delta.x * rotationSpeedFactor);
 
         } else {

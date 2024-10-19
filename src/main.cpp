@@ -34,18 +34,12 @@ DISABLE_WARNINGS_POP()
 
 #include "buffer.h"
 #include "mesh_ex.h"
+#include "solve.h"
 #include "tree_cotree.h"
 
 // Configuration
 const int WIDTH = 1200;
 const int HEIGHT = 800;
-
-struct Texture {
-	int width;
-	int height;
-	int channels;
-	stbi_uc* texture_data;
-};
 
 enum Stage {
 	CHOOSE_MESH,
@@ -161,7 +155,9 @@ int main(int argc, char** argv)
 
 	// Algorithm data
 	std::vector<int> tree_assignment;
+	std::vector<std::vector<int>> noncon_cycles;
 	std::vector<int> noncon_ks;
+	std::vector<double> adjustment_angles;
 
 	// Cycle data
 	std::vector<bool> dual_edges_selected;
@@ -170,6 +166,7 @@ int main(int argc, char** argv)
 	std::vector<bool> dual_edges_vertex_partition;
 	bool is_noncon;
 	double curvature_partition;
+	double curvature_partition_adjusted;
 
 	// Handle key press
 	window.registerKeyCallback([&](int key, int scancode, int action, int mods) {
@@ -221,7 +218,7 @@ int main(int argc, char** argv)
 	const std::array<std::string, 4> stage_descriptions{
 		"Select a mesh to construct a\n  vector field on.",
 		"Set the singularities of each\n  vertex.\nSelect a vertex by holding\n  SHIFT and clicking on the\n  mesh.\nIncrease or decrease its index\n  in the GUI.",
-		"Tree-Cotree Decomposition (TODO)",
+		"View the tree and cotree\n  generated for this mesh.\nHighlight a noncontractible\n  cycle in the GUI.\nIncrease or decrease its index\n  in the GUI.",
 		"Test Cycles (TODO)",
 	};
 
@@ -242,7 +239,7 @@ int main(int argc, char** argv)
 		mesh_buffer_wireframe = MeshBuffer::fromEdges(mesh.vertices, mesh_edges);
 
 		tree_assignment = treeCotreeDecompose(mesh_ex);
-		std::vector<std::vector<int>> paths = findNoncontractibleCycles(mesh_ex, tree_assignment);
+		noncon_cycles = findNoncontractibleCycles(mesh_ex, tree_assignment);
 
 		// Create tree data for rendering
 		std::vector<glm::vec3> tree_positions;
@@ -291,12 +288,12 @@ int main(int argc, char** argv)
 			mb.cleanUp();
 		mesh_buffers_noncon = {};
 
-		for (std::vector<int>& path : paths) {
+		for (std::vector<int>& noncon_cycle : noncon_cycles) {
 			MeshBuffer mesh_buffer_noncon = MeshBuffer::empty();
 			std::vector<glm::vec3> noncon_positions;
 			std::vector<int> noncon_indices;
 
-			for (int e_idx : path) {
+			for (int e_idx : noncon_cycle) {
 				const EdgeEx& e = mesh_ex.edges[e_idx];
 
 				glm::vec3 e_center = 0.5f * (mesh_ex.vertices[e.vertices[0]].position + mesh_ex.vertices[e.vertices[1]].position);
@@ -319,16 +316,17 @@ int main(int argc, char** argv)
 
 		// Initialize noncon-cycle k's
 		noncon_ks = {};
-		for (int i = 0; i < paths.size(); i++)
+		for (int i = 0; i < noncon_cycles.size(); i++)
 			noncon_ks.push_back(0);
 
 		// Create GUI selection items
 		noncon_items = { "None" };
-		for (int i = 0; i < paths.size(); i++)
+		for (int i = 0; i < noncon_cycles.size(); i++)
 			noncon_items.push_back(std::format("Cycle #{}", i + 1));
 	};
 
-	loadMainMesh("torus");
+	loadMainMesh("tet");
+	mesh_ex.vertices[0].k = 2;
 
 	while (!window.shouldClose()) {
 		// Update input
@@ -383,6 +381,9 @@ int main(int argc, char** argv)
 						dual_edges_vertex_partition = {};
 						for (int v_idx = 0; v_idx < mesh_ex.vertices.size(); v_idx++)
 							dual_edges_vertex_partition.push_back(false);
+
+						std::vector<std::pair<std::vector<int>, int>> cycles = getCycles(mesh_ex, noncon_cycles, noncon_ks);
+						adjustment_angles = calculateAdjustmentAngles(mesh_ex, cycles);
 					}
 				}
 			}
@@ -466,6 +467,7 @@ int main(int argc, char** argv)
 					ImGui::Text(is_noncon ? "  type   = noncontractible" : "  type   = contractible");
 					ImGui::Text("  #edges = %i", dual_edges_path.size());
 					ImGui::Text("  defect = %f", curvature_partition);
+					ImGui::Text("  final  = %f", curvature_partition_adjusted);
 				}
 				else {
 					ImGui::TextColored(ImVec4(1.0, 0.4, 0.2, 1.0), "Cycle incomplete");
@@ -571,6 +573,7 @@ int main(int argc, char** argv)
 						}
 
 						curvature_partition = glm::abs(mesh_ex.angleOnPath(dual_edges_path));
+						curvature_partition_adjusted = glm::abs(mesh_ex.angleOnPathAdjusted(dual_edges_path, adjustment_angles));
 					}
 				}
 

@@ -65,7 +65,7 @@ MeshEx MeshEx::fromMesh(const Mesh mesh)
 		int v_degree = v.edges.size();
 
 		int e_curr_idx = v.edges[0];
-		bool facing_outwards = result.edges[0].vertices[0] == v_idx;
+		bool facing_outwards = result.edges[e_curr_idx].vertices[0] == v_idx;
 		int f_curr_idx = result.edges[e_curr_idx].faces[facing_outwards];
 
 		std::vector<int> edges_ordered = {};
@@ -233,13 +233,29 @@ double MeshEx::defectAroundVertex(int v_idx) const {
 	return curvature - 2.0 * glm::pi<double>();
 }
 
-double MeshEx::angleOnPath(std::vector<int> path) {
+double MeshEx::angleOnPath(std::vector<int> path) const {
 	double angle = 0.0f;
 	for (int i = 0; i < path.size(); i++) {
 		int e_a_idx = path[i];
 		int e_b_idx = path[(i + 1) % path.size()];
 
 		angle += signedAngleBetweenEdges(e_a_idx, e_b_idx);
+	}
+
+	return angle;
+}
+
+double MeshEx::angleOnPathAdjusted(std::vector<int> path, std::vector<double> adjustment_angles) const {
+	double angle = 0.0f;
+	for (int i = 0; i < path.size(); i++) {
+		int e_a_idx = path[i];
+		int e_b_idx = path[(i + 1) % path.size()];
+
+		int f_to_idx = commonFaceOfEdges(e_a_idx, e_b_idx);
+		int f_from_idx = otherFace(e_a_idx, f_to_idx);
+		double factor = f_from_idx < f_to_idx ? 1.0 : -1.0;
+
+		angle += signedAngleBetweenEdges(e_a_idx, e_b_idx) + adjustment_angles[e_a_idx] * factor;
 	}
 
 	return angle;
