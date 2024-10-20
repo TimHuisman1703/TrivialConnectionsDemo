@@ -157,7 +157,8 @@ int main(int argc, char** argv)
 	bool show_noncons = true;
 	int selected_noncon_item_idx = 0;
 	std::vector<std::string> noncon_items;
-	double travel_speed = 0.01;
+	float travel_speed = 0.01f;
+	float travel_start_angle = 0.0f;
 	bool show_travel_original = true;
 	bool show_travel_adjusted = true;
 	bool show_singularity_data = true;
@@ -181,6 +182,7 @@ int main(int argc, char** argv)
 	std::vector<glm::vec3> travel_normals;
 	std::vector<double> travel_angles_original;
 	std::vector<double> travel_angles_adjusted;
+	std::vector<double> travel_angle_adjustments;
 	int travel_index;
 	float travel_frac;
 
@@ -235,7 +237,7 @@ int main(int argc, char** argv)
 		"Select a mesh to construct a\n  vector field on.",
 		"Set the singularities of each\n  vertex.\nSelect a vertex by holding\n  SHIFT and clicking on the\n  mesh.\nIncrease or decrease its index\n  in the GUI.",
 		"View the tree and cotree\n  generated for this mesh.\nHighlight a noncontractible\n  cycle in the GUI.\nIncrease or decrease its index\n  in the GUI.",
-		"Test Cycles (TODO)",
+		"Draw a cycle by selecting a\n  set of edges.\nSelect an edge by holding SHIFT\n  and clicking on the mesh.\nInspect data about the cycle\n  in the GUI.",
 	};
 
 	// Method for loading new mesh
@@ -335,6 +337,11 @@ int main(int argc, char** argv)
 		for (int i = 0; i < noncon_cycles.size(); i++)
 			noncon_ks.push_back(0);
 
+		// Clear selected edges
+		dual_edges_selected = {};
+		for (int e_idx = 0; e_idx < mesh_ex.edges.size(); e_idx++)
+			dual_edges_selected.push_back(false);
+
 		// Create GUI selection items
 		noncon_items = { "None" };
 		for (int i = 0; i < noncon_cycles.size(); i++)
@@ -342,7 +349,6 @@ int main(int argc, char** argv)
 	};
 
 	loadMainMesh("icosphere");
-	mesh_ex.vertices[0].k = 2;
 
 	while (!window.shouldClose()) {
 		// Update input
@@ -391,10 +397,7 @@ int main(int argc, char** argv)
 					dual_edges_reload = true;
 
 					if (stage == TEST_CYCLES) {
-						dual_edges_selected = {};
-						for (int e_idx = 0; e_idx < mesh_ex.edges.size(); e_idx++)
-							dual_edges_selected.push_back(false);
-
+						dual_edges_reload = true;
 						std::vector<std::pair<std::vector<int>, int>> cycles = getCycles(mesh_ex, noncon_cycles, noncon_ks);
 						adjustment_angles = calculateAdjustmentAngles(mesh_ex, cycles);
 					}
@@ -423,14 +426,14 @@ int main(int argc, char** argv)
 			}
 			else if (stage == VERTEX_K) {
 				if (selected_vertex_idx > -1) {
-					ImGui::Text("Selected Vertex: #%i", selected_vertex_idx);
-					ImGui::Text("Singularity Index (k):");
+					ImGui::Text("Selected vertex: #%i", selected_vertex_idx);
+					ImGui::Text("Singularity index (k):");
 					ImGui::Indent();
 					ImGui::InputInt("k", &mesh_ex.vertices[selected_vertex_idx].k);
 					ImGui::Unindent();
 				}
 				else {
-					ImGui::Text("Selected Vertex: None");
+					ImGui::Text("Selected vertex: None");
 				}
 
 				ImGui::Separator();
@@ -445,19 +448,19 @@ int main(int argc, char** argv)
 				}
 			}
 			else if (stage == TREE_COTREE) {
-				ImGui::Checkbox("Show Tree", &show_tree);
-				ImGui::Checkbox("Show Cotree", &show_cotree);
-				ImGui::Checkbox("Show Noncontractible Cycles", &show_noncons);
+				ImGui::Checkbox("Show tree", &show_tree);
+				ImGui::Checkbox("Show cotree", &show_cotree);
+				ImGui::Checkbox("Show noncontractible cycles", &show_noncons);
 				if (show_noncons) {
 					std::vector<const char*> noncon_items_pointers;
 					for (const std::string& item : noncon_items)
 						noncon_items_pointers.push_back(item.c_str());
-					ImGui::Text("Selected Cycle:");
+					ImGui::Text("Selected cycle:");
 					ImGui::Indent();
 					ImGui::Combo("##", &selected_noncon_item_idx, noncon_items_pointers.data(), (int)noncon_items_pointers.size());
 					ImGui::Unindent();
 					if (selected_noncon_item_idx > 0) {
-						ImGui::Text("Singularity Index (k):");
+						ImGui::Text("Singularity index (k):");
 						ImGui::Indent();
 						ImGui::InputInt("k", &noncon_ks[selected_noncon_item_idx - 1]);
 						ImGui::Unindent();
@@ -481,19 +484,21 @@ int main(int argc, char** argv)
 						dual_edges_selected.push_back(false);
 					dual_edges_reload = true;
 				}
-				ImGui::Checkbox("Show Singularity Data", &show_singularity_data);
+				ImGui::Checkbox("Show singularity data", &show_singularity_data);
 				if (!dual_edges_path.empty()) {
 					int num_rotations = glm::round(0.5 * curvature_partition_adjusted / glm::pi<double>());
 
 					ImGui::TextColored(ImVec4(0.2, 1.0, 0.4, 1.0), "Cycle complete");
-					ImGui::Text(is_noncon ? "  type   = noncontractible" : "  type   = contractible");
-					ImGui::Text("  #edges   = %i", dual_edges_path.size());
-					ImGui::Text("  rotation");
-					ImGui::Text("    before = %f", curvature_partition);
-					ImGui::Text("    after  = %f", curvature_partition_adjusted);
+					ImGui::Text(is_noncon ? "  Type   = Noncontractible" : "  Type   = Contractible");
+					ImGui::Text("  #Edges   = %i", dual_edges_path.size());
+					ImGui::Text("  Rotation");
+					ImGui::Text("    Original = %f", curvature_partition);
+					ImGui::Text("    Adjusted = %f", curvature_partition_adjusted);
 					ImGui::Text("      %i rotation(s)", num_rotations);
-					ImGui::Checkbox("Show Original Vectors", &show_travel_original);
-					ImGui::Checkbox("Show Adjusted Vectors", &show_travel_adjusted);
+					ImGui::Checkbox("Show original vectors", &show_travel_original);
+					ImGui::Checkbox("Show adjusted vectors", &show_travel_adjusted);
+					ImGui::SliderFloat("Speed", &travel_speed, 0.0f, 0.05f);
+					ImGui::SliderFloat("Angle", &travel_start_angle, 0.0f, 2 * glm::pi<float>());
 				}
 				else {
 					ImGui::TextColored(ImVec4(1.0, 0.4, 0.2, 1.0), "Cycle incomplete");
@@ -618,9 +623,12 @@ int main(int argc, char** argv)
 							glm::vec3 f_a_center = mesh_ex.centerOfMass(e.faces[0]);
 							glm::vec3 f_b_center = mesh_ex.centerOfMass(e.faces[1]);
 
-							dual_edges_positions.push_back(f_a_center);
-							dual_edges_positions.push_back(e_center);
-							dual_edges_positions.push_back(f_b_center);
+							const FaceEx& f_a = mesh_ex.faces[e.faces[0]];
+							const FaceEx& f_b = mesh_ex.faces[e.faces[1]];
+
+							dual_edges_positions.push_back(f_a_center + glm::normalize(f_a.normal) * 0.005f);
+							dual_edges_positions.push_back(e_center + glm::normalize(f_a.normal + f_b.normal) * 0.005f);
+							dual_edges_positions.push_back(f_b_center + glm::normalize(f_b.normal) * 0.005f);
 							dual_edges_indices.push_back(dual_edges_positions.size() - 3);
 							dual_edges_indices.push_back(dual_edges_positions.size() - 2);
 							dual_edges_indices.push_back(dual_edges_positions.size() - 2);
@@ -634,6 +642,7 @@ int main(int argc, char** argv)
 					travel_normals = {};
 					travel_angles_original = { 0.0f };
 					travel_angles_adjusted = { 0.0f };
+					travel_angle_adjustments = {};
 					for (int i = 0; i < dual_edges_path.size(); i++) {
 						int e_a_idx = dual_edges_path[i];
 						int e_b_idx = dual_edges_path[(i + 1) % dual_edges_path.size()];
@@ -668,9 +677,10 @@ int main(int argc, char** argv)
 						travel_normals.push_back(f_to.normal);
 						travel_angles_original.push_back(travel_angles_original[travel_angles_original.size() - 1] + angle_curve);
 						travel_angles_adjusted.push_back(travel_angles_adjusted[travel_angles_adjusted.size() - 1] + angle_curve + angle_adjustment);
+						travel_angle_adjustments.push_back(angle_adjustment);
 
-						dual_edges_positions.push_back(e_a_center);
-						dual_edges_positions.push_back(e_b_center);
+						dual_edges_positions.push_back(e_a_center + glm::normalize(f_from.normal + f_to.normal) * 0.005f);
+						dual_edges_positions.push_back(e_b_center + glm::normalize(f_to.normal + f_next.normal) * 0.005f);
 						dual_edges_indices.push_back(dual_edges_positions.size() - 2);
 						dual_edges_indices.push_back(dual_edges_positions.size() - 1);
 					}
@@ -695,10 +705,12 @@ int main(int argc, char** argv)
 						angle_original = travel_angles_original[travel_angles_original.size() - 1];
 						angle_adjusted = travel_angles_adjusted[travel_angles_adjusted.size() - 1];
 					}
+					angle_adjusted -= travel_angle_adjustments[(travel_index + travel_angle_adjustments.size() - 1) % travel_angle_adjustments.size()] * glm::max(0.0f, 0.5f - travel_frac);
+					angle_adjusted += travel_angle_adjustments[travel_index] * glm::max(0.0f, travel_frac - 0.5f);
 
-					glm::vec3 origin = pos_a * (1.0f - travel_frac) + pos_b * travel_frac;
-					glm::vec3 direction_original = glm::normalize(glm::rotate(glm::normalize(pos_b - pos_a), angle_original, normal) + normal * 0.02f);
-					glm::vec3 direction_adjusted = glm::normalize(glm::rotate(glm::normalize(pos_b - pos_a), angle_adjusted, normal) + normal * 0.02f);
+					glm::vec3 origin = pos_a * (1.0f - travel_frac) + pos_b * travel_frac + normal * 0.01f;;
+					glm::vec3 direction_original = glm::rotate(glm::normalize(pos_b - pos_a), travel_start_angle + angle_original, normal);
+					glm::vec3 direction_adjusted = glm::rotate(glm::normalize(pos_b - pos_a), travel_start_angle + angle_adjusted, normal);
 
 					double edge_length = glm::length(pos_b - pos_a);
 					travel_frac += travel_speed / edge_length;
@@ -726,9 +738,9 @@ int main(int argc, char** argv)
 						float angle_original = travel_angles_original[i];
 						float angle_adjusted = travel_angles_adjusted[i];
 
-						glm::vec3 origin = 0.5f * (pos_a + pos_b);
-						glm::vec3 direction_original = glm::normalize(glm::rotate(glm::normalize(pos_b - pos_a), angle_original, normal) + normal * 0.02f);
-						glm::vec3 direction_adjusted = glm::normalize(glm::rotate(glm::normalize(pos_b - pos_a), angle_adjusted, normal) + normal * 0.02f);
+						glm::vec3 origin = 0.5f * (pos_a + pos_b) + normal * 0.01f;
+						glm::vec3 direction_original = glm::rotate(glm::normalize(pos_b - pos_a), travel_start_angle + angle_original, normal);
+						glm::vec3 direction_adjusted = glm::rotate(glm::normalize(pos_b - pos_a), travel_start_angle + angle_adjusted, normal);
 
 						travel_field_original_positions.push_back(origin);
 						travel_field_original_positions.push_back(origin + direction_original * 0.1f);
