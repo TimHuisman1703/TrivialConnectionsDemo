@@ -7,6 +7,7 @@ DISABLE_WARNINGS_PUSH()
 #include <GLFW/glfw3.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <glm/gtx/rotate_vector.hpp>
 #include <glm/mat4x4.hpp>
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
@@ -118,6 +119,10 @@ int main(int argc, char** argv)
 	MeshBuffer mesh_buffer_tree = MeshBuffer::empty();
 	MeshBuffer mesh_buffer_cotree = MeshBuffer::empty();
 	std::vector<MeshBuffer> mesh_buffers_noncon;
+	MeshBuffer mesh_buffer_travel_vector_original = MeshBuffer::empty();
+	MeshBuffer mesh_buffer_travel_field_original = MeshBuffer::empty();
+	MeshBuffer mesh_buffer_travel_vector_adjusted = MeshBuffer::empty();
+	MeshBuffer mesh_buffer_travel_field_adjusted = MeshBuffer::empty();
 
 	// Build shaders
 	const Shader normal_shader = ShaderBuilder()
@@ -152,6 +157,10 @@ int main(int argc, char** argv)
 	bool show_noncons = true;
 	int selected_noncon_item_idx = 0;
 	std::vector<std::string> noncon_items;
+	double travel_speed = 0.01;
+	bool show_travel_original = true;
+	bool show_travel_adjusted = true;
+	bool show_singularity_data = true;
 
 	// Algorithm data
 	std::vector<int> tree_assignment;
@@ -163,10 +172,17 @@ int main(int argc, char** argv)
 	std::vector<bool> dual_edges_selected;
 	bool dual_edges_reload = true;
 	std::vector<int> dual_edges_path;
-	std::vector<bool> dual_edges_vertex_partition;
 	bool is_noncon;
 	double curvature_partition;
 	double curvature_partition_adjusted;
+
+	// Travel 
+	std::vector<glm::vec3> travel_path;
+	std::vector<glm::vec3> travel_normals;
+	std::vector<double> travel_angles_original;
+	std::vector<double> travel_angles_adjusted;
+	int travel_index;
+	float travel_frac;
 
 	// Handle key press
 	window.registerKeyCallback([&](int key, int scancode, int action, int mods) {
@@ -325,7 +341,7 @@ int main(int argc, char** argv)
 			noncon_items.push_back(std::format("Cycle #{}", i + 1));
 	};
 
-	loadMainMesh("tet");
+	loadMainMesh("icosphere");
 	mesh_ex.vertices[0].k = 2;
 
 	while (!window.shouldClose()) {
@@ -378,9 +394,6 @@ int main(int argc, char** argv)
 						dual_edges_selected = {};
 						for (int e_idx = 0; e_idx < mesh_ex.edges.size(); e_idx++)
 							dual_edges_selected.push_back(false);
-						dual_edges_vertex_partition = {};
-						for (int v_idx = 0; v_idx < mesh_ex.vertices.size(); v_idx++)
-							dual_edges_vertex_partition.push_back(false);
 
 						std::vector<std::pair<std::vector<int>, int>> cycles = getCycles(mesh_ex, noncon_cycles, noncon_ks);
 						adjustment_angles = calculateAdjustmentAngles(mesh_ex, cycles);
@@ -462,12 +475,25 @@ int main(int argc, char** argv)
 				}
 			}
 			else if (stage == TEST_CYCLES) {
+				if (ImGui::Button("Clear", ImVec2(width, 19))) {
+					dual_edges_selected = {};
+					for (int e_idx = 0; e_idx < mesh_ex.edges.size(); e_idx++)
+						dual_edges_selected.push_back(false);
+					dual_edges_reload = true;
+				}
+				ImGui::Checkbox("Show Singularity Data", &show_singularity_data);
 				if (!dual_edges_path.empty()) {
+					int num_rotations = glm::round(0.5 * curvature_partition_adjusted / glm::pi<double>());
+
 					ImGui::TextColored(ImVec4(0.2, 1.0, 0.4, 1.0), "Cycle complete");
 					ImGui::Text(is_noncon ? "  type   = noncontractible" : "  type   = contractible");
-					ImGui::Text("  #edges = %i", dual_edges_path.size());
-					ImGui::Text("  defect = %f", curvature_partition);
-					ImGui::Text("  final  = %f", curvature_partition_adjusted);
+					ImGui::Text("  #edges   = %i", dual_edges_path.size());
+					ImGui::Text("  rotation");
+					ImGui::Text("    before = %f", curvature_partition);
+					ImGui::Text("    after  = %f", curvature_partition_adjusted);
+					ImGui::Text("      %i rotation(s)", num_rotations);
+					ImGui::Checkbox("Show Original Vectors", &show_travel_original);
+					ImGui::Checkbox("Show Adjusted Vectors", &show_travel_adjusted);
 				}
 				else {
 					ImGui::TextColored(ImVec4(1.0, 0.4, 0.2, 1.0), "Cycle incomplete");
@@ -543,7 +569,9 @@ int main(int argc, char** argv)
 					if (dual_edges_path.size() != expected_length)
 						dual_edges_path = {};
 
-					std::fill(dual_edges_vertex_partition.begin(), dual_edges_vertex_partition.end(), false);
+					std::vector<bool> dual_edges_vertex_partition = {};
+					for (int v_idx = 0; v_idx < mesh_ex.vertices.size(); v_idx++)
+						dual_edges_vertex_partition.push_back(false);
 					if (!dual_edges_path.empty()) {
 						int v_start_idx = mesh_ex.edges[e_curr_idx].vertices[0];
 
@@ -572,36 +600,149 @@ int main(int argc, char** argv)
 								dual_edges_vertex_partition[v_idx] = !dual_edges_vertex_partition[v_idx];
 						}
 
-						curvature_partition = glm::abs(mesh_ex.angleOnPath(dual_edges_path));
-						curvature_partition_adjusted = glm::abs(mesh_ex.angleOnPathAdjusted(dual_edges_path, adjustment_angles));
+						curvature_partition = mesh_ex.angleOnPath(dual_edges_path);
+						curvature_partition_adjusted = mesh_ex.angleOnPathAdjusted(dual_edges_path, adjustment_angles);
 					}
 				}
 
 				// Create cycle data for rendering
 				std::vector<glm::vec3> dual_edges_positions;
 				std::vector<int> dual_edges_indices;
-				for (int e_idx = 0; e_idx < mesh_ex.edges.size(); e_idx++) {
-					if (dual_edges_selected[e_idx]) {
-						const EdgeEx& e = mesh_ex.edges[e_idx];
+				if (dual_edges_path.empty()) {
+					// Incomplete path
+					for (int e_idx = 0; e_idx < mesh_ex.edges.size(); e_idx++) {
+						if (dual_edges_selected[e_idx]) {
+							const EdgeEx& e = mesh_ex.edges[e_idx];
 
-						glm::vec3 e_center = 0.5f * (mesh_ex.vertices[e.vertices[0]].position + mesh_ex.vertices[e.vertices[1]].position);
-						glm::vec3 f_a_center = mesh_ex.centerOfMass(e.faces[0]);
-						glm::vec3 f_b_center = mesh_ex.centerOfMass(e.faces[1]);
+							glm::vec3 e_center = 0.5f * (mesh_ex.vertices[e.vertices[0]].position + mesh_ex.vertices[e.vertices[1]].position);
+							glm::vec3 f_a_center = mesh_ex.centerOfMass(e.faces[0]);
+							glm::vec3 f_b_center = mesh_ex.centerOfMass(e.faces[1]);
 
-						dual_edges_positions.push_back(f_a_center);
-						dual_edges_positions.push_back(e_center);
-						dual_edges_positions.push_back(f_b_center);
+							dual_edges_positions.push_back(f_a_center);
+							dual_edges_positions.push_back(e_center);
+							dual_edges_positions.push_back(f_b_center);
+							dual_edges_indices.push_back(dual_edges_positions.size() - 3);
+							dual_edges_indices.push_back(dual_edges_positions.size() - 2);
+							dual_edges_indices.push_back(dual_edges_positions.size() - 2);
+							dual_edges_indices.push_back(dual_edges_positions.size() - 1);
+						}
+					}
+				}
+				else {
+					// Complete path (tighter)
+					travel_path = {};
+					travel_normals = {};
+					travel_angles_original = { 0.0f };
+					travel_angles_adjusted = { 0.0f };
+					for (int i = 0; i < dual_edges_path.size(); i++) {
+						int e_a_idx = dual_edges_path[i];
+						int e_b_idx = dual_edges_path[(i + 1) % dual_edges_path.size()];
+						int e_c_idx = dual_edges_path[(i + 2) % dual_edges_path.size()];
+						int f_to_idx = mesh_ex.commonFaceOfEdges(e_a_idx, e_b_idx);
+						int f_from_idx = mesh_ex.otherFace(e_a_idx, f_to_idx);
+						int f_next_idx = mesh_ex.otherFace(e_b_idx, f_to_idx);
 
-						dual_edges_indices.push_back(dual_edges_positions.size() - 3);
-						dual_edges_indices.push_back(dual_edges_positions.size() - 2);
+						const EdgeEx& e_a = mesh_ex.edges[e_a_idx];
+						const EdgeEx& e_b = mesh_ex.edges[e_b_idx];
+						const EdgeEx& e_c = mesh_ex.edges[e_c_idx];
+						const FaceEx& f_from = mesh_ex.faces[f_from_idx];
+						const FaceEx& f_to = mesh_ex.faces[f_to_idx];
+						const FaceEx& f_next = mesh_ex.faces[f_next_idx];
+
+						glm::vec3 e_a_center = 0.5f * (mesh_ex.vertices[e_a.vertices[0]].position + mesh_ex.vertices[e_a.vertices[1]].position);
+						glm::vec3 e_b_center = 0.5f * (mesh_ex.vertices[e_b.vertices[0]].position + mesh_ex.vertices[e_b.vertices[1]].position);
+						glm::vec3 e_c_center = 0.5f * (mesh_ex.vertices[e_c.vertices[0]].position + mesh_ex.vertices[e_c.vertices[1]].position);
+
+						glm::vec3 dir_ab = glm::normalize(e_b_center - e_a_center);
+						glm::vec3 dir_b = glm::normalize(mesh_ex.vertices[e_b.vertices[1]].position - mesh_ex.vertices[e_b.vertices[0]].position);
+						if (glm::dot(glm::cross(dir_ab, dir_b), f_to.normal) < 0)
+							dir_b = -dir_b;
+						glm::vec3 dir_bc = glm::normalize(e_c_center - e_b_center);
+
+						double angle_curve = glm::acos(glm::dot(dir_bc, dir_b)) - glm::acos(glm::dot(dir_ab, dir_b));
+						double angle_adjustment = adjustment_angles[e_b_idx];
+						if (e_b.faces[0] == f_to_idx)
+							angle_adjustment = -angle_adjustment;
+
+						travel_path.push_back(e_a_center);
+						travel_normals.push_back(f_to.normal);
+						travel_angles_original.push_back(travel_angles_original[travel_angles_original.size() - 1] + angle_curve);
+						travel_angles_adjusted.push_back(travel_angles_adjusted[travel_angles_adjusted.size() - 1] + angle_curve + angle_adjustment);
+
+						dual_edges_positions.push_back(e_a_center);
+						dual_edges_positions.push_back(e_b_center);
 						dual_edges_indices.push_back(dual_edges_positions.size() - 2);
 						dual_edges_indices.push_back(dual_edges_positions.size() - 1);
 					}
 				}
-
 				mesh_buffer_dual_edges.load(dual_edges_positions, dual_edges_indices);
 
+				travel_index = 0;
+				travel_frac = 0.5f;
+
 				dual_edges_reload = false;
+			}
+
+			if (!travel_path.empty()) {
+				// Update travel vector data
+				{
+					glm::vec3 pos_a = travel_path[travel_index];
+					glm::vec3 pos_b = travel_path[(travel_index + 1) % travel_path.size()];
+					glm::vec3 normal = travel_normals[travel_index];
+					float angle_original = travel_angles_original[travel_index];
+					float angle_adjusted = travel_angles_adjusted[travel_index];
+					if (travel_index == 0 && travel_frac < 0.5f) {
+						angle_original = travel_angles_original[travel_angles_original.size() - 1];
+						angle_adjusted = travel_angles_adjusted[travel_angles_adjusted.size() - 1];
+					}
+
+					glm::vec3 origin = pos_a * (1.0f - travel_frac) + pos_b * travel_frac;
+					glm::vec3 direction_original = glm::normalize(glm::rotate(glm::normalize(pos_b - pos_a), angle_original, normal) + normal * 0.02f);
+					glm::vec3 direction_adjusted = glm::normalize(glm::rotate(glm::normalize(pos_b - pos_a), angle_adjusted, normal) + normal * 0.02f);
+
+					double edge_length = glm::length(pos_b - pos_a);
+					travel_frac += travel_speed / edge_length;
+					if (travel_frac >= 1.0f) {
+						travel_index = (travel_index + 1) % travel_path.size();
+						travel_frac = 0.0f;
+					}
+
+					// Create travel vector data for rendering
+					mesh_buffer_travel_vector_original.load({ origin, origin + direction_original * 0.2f }, { 0, 1 });
+					mesh_buffer_travel_vector_adjusted.load({ origin, origin + direction_adjusted * 0.2f }, { 0, 1 });
+				}
+
+				// Create travel field data for rendering
+				{
+					std::vector<glm::vec3> travel_field_original_positions;
+					std::vector<int> travel_field_original_indices;
+					std::vector<glm::vec3> travel_field_adjusted_positions;
+					std::vector<int> travel_field_adjusted_indices;
+
+					for (int i = 0; i <= travel_path.size(); i++) {
+						glm::vec3 pos_a = travel_path[i % travel_path.size()];
+						glm::vec3 pos_b = travel_path[(i + 1) % travel_path.size()];
+						glm::vec3 normal = travel_normals[i % travel_path.size()];
+						float angle_original = travel_angles_original[i];
+						float angle_adjusted = travel_angles_adjusted[i];
+
+						glm::vec3 origin = 0.5f * (pos_a + pos_b);
+						glm::vec3 direction_original = glm::normalize(glm::rotate(glm::normalize(pos_b - pos_a), angle_original, normal) + normal * 0.02f);
+						glm::vec3 direction_adjusted = glm::normalize(glm::rotate(glm::normalize(pos_b - pos_a), angle_adjusted, normal) + normal * 0.02f);
+
+						travel_field_original_positions.push_back(origin);
+						travel_field_original_positions.push_back(origin + direction_original * 0.1f);
+						travel_field_original_indices.push_back(travel_field_original_positions.size() - 2);
+						travel_field_original_indices.push_back(travel_field_original_positions.size() - 1);
+
+						travel_field_adjusted_positions.push_back(origin);
+						travel_field_adjusted_positions.push_back(origin + direction_adjusted * 0.1f);
+						travel_field_adjusted_indices.push_back(travel_field_adjusted_positions.size() - 2);
+						travel_field_adjusted_indices.push_back(travel_field_adjusted_positions.size() - 1);
+					}
+					mesh_buffer_travel_field_original.load(travel_field_original_positions, travel_field_original_indices);
+					mesh_buffer_travel_field_adjusted.load(travel_field_adjusted_positions, travel_field_adjusted_indices);
+				}
 			}
 		}
 
@@ -667,13 +808,49 @@ int main(int argc, char** argv)
 			glBindBuffer(GL_ARRAY_BUFFER, 0);
 			glBindVertexArray(0);
 
-			if (stage == VERTEX_K || stage >= TEST_CYCLES) {
+			if (stage == TEST_CYCLES) {
+				if (dual_edges_path.size()) {
+					if (show_travel_original) {
+						// Draw travel vector (original)
+						wireframe_shader.bind();
+						glm::vec4 red_transparent{ 1.0f, 0.1f, 0.1f, 0.35f };
+						glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
+						glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(red_transparent));
+						glLineWidth(8);
+
+						glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_travel_vector_original.vbo);
+						glBindVertexArray(mesh_buffer_travel_vector_original.vao);
+						glVertexAttribPointer(wireframe_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+						glDrawElements(GL_LINES, mesh_buffer_travel_vector_original.indices_amount, GL_UNSIGNED_INT, 0);
+						glBindBuffer(GL_ARRAY_BUFFER, 0);
+						glBindVertexArray(0);
+					}
+
+					if (show_travel_adjusted) {
+						// Draw travel vector (adjusted)
+						wireframe_shader.bind();
+						glm::vec4 blue_transparent{ 0.1f, 0.4f, 1.0f, 0.35f };
+						glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
+						glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(blue_transparent));
+						glLineWidth(8);
+
+						glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_travel_vector_adjusted.vbo);
+						glBindVertexArray(mesh_buffer_travel_vector_adjusted.vao);
+						glVertexAttribPointer(wireframe_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+						glDrawElements(GL_LINES, mesh_buffer_travel_vector_adjusted.indices_amount, GL_UNSIGNED_INT, 0);
+						glBindBuffer(GL_ARRAY_BUFFER, 0);
+						glBindVertexArray(0);
+					}
+				}
+			}
+
+			if (stage == VERTEX_K) {
 				// Draw background singularity vertices
 				singularity_shader.bind();
 				glUniformMatrix4fv(singularity_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
 				glUniform1i(singularity_shader.getUniformLocation("selected_vertex_idx"), selected_vertex_idx);
 				glUniform1i(singularity_shader.getUniformLocation("draw_zero_k"), stage == VERTEX_K);
-				glUniform1i(singularity_shader.getUniformLocation("transparent"), true);
+				glUniform1f(singularity_shader.getUniformLocation("alpha"), 0.35f);
 				singularity_shader.bindUniformBlock("vertex_buffer", 0, singularity_ubo);
 
 				glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_singularity.vbo);
@@ -734,13 +911,15 @@ int main(int argc, char** argv)
 
 		// Draw foreground
 		{
-			if (stage == VERTEX_K || stage >= TEST_CYCLES) {
+			if (stage == VERTEX_K || (stage == TEST_CYCLES && show_singularity_data)) {
+				float alpha = stage == VERTEX_K ? 1.0f : 0.5f;
+
 				// Draw singularity vertices
 				singularity_shader.bind();
 				glUniformMatrix4fv(singularity_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
 				glUniform1i(singularity_shader.getUniformLocation("selected_vertex_idx"), selected_vertex_idx);
 				glUniform1i(singularity_shader.getUniformLocation("draw_zero_k"), stage == VERTEX_K);
-				glUniform1i(singularity_shader.getUniformLocation("transparent"), false);
+				glUniform1f(singularity_shader.getUniformLocation("alpha"), alpha);
 				singularity_shader.bindUniformBlock("vertex_buffer", 0, singularity_ubo);
 
 				glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_singularity.vbo);
@@ -751,10 +930,12 @@ int main(int argc, char** argv)
 				glBindVertexArray(0);
 			}
 
-			if (stage == TREE_COTREE) {
-				if (show_noncons) {
+			if ((stage == TREE_COTREE && show_noncons) || (stage == TEST_CYCLES && show_singularity_data)) {
+				int selected_noncon_idx = -1;
+
+				if (stage == TREE_COTREE) {
 					// Draw selected noncon-cycle
-					int selected_noncon_idx = selected_noncon_item_idx - 1;
+					selected_noncon_idx = selected_noncon_item_idx - 1;
 					if (selected_noncon_idx > -1) {
 						const MeshBuffer& mesh_buffer_noncon_selected = mesh_buffers_noncon[selected_noncon_idx];
 
@@ -775,32 +956,105 @@ int main(int argc, char** argv)
 						glBindBuffer(GL_ARRAY_BUFFER, 0);
 						glBindVertexArray(0);
 					}
+				}
 
-					// Draw unselected noncon-cycles
-					for (int i = 0; i < mesh_buffers_noncon.size(); i++) {
-						if (i == selected_noncon_idx)
-							continue;
-						const MeshBuffer& mesh_buffer_noncon = mesh_buffers_noncon[i];
+				// Draw unselected noncon-cycles
+				for (int i = 0; i < mesh_buffers_noncon.size(); i++) {
+					if (i == selected_noncon_idx)
+						continue;
+					const MeshBuffer& mesh_buffer_noncon = mesh_buffers_noncon[i];
 
-						int k = noncon_ks[i];
-						float a = pow(0.6, abs(k));
-						float b = pow(0.9, abs(k));
-						glm::vec4 noncon_color = k > 0 ? glm::vec4{ 1.0f, b, a, 1.0f } : glm::vec4{ a, b, 1.0f, 1.0f };
+					int k = noncon_ks[i];
+					float a = pow(0.6, abs(k));
+					float b = pow(0.9, abs(k));
+					if (stage == TEST_CYCLES && k == 0)
+						continue;
+					float alpha = stage == TREE_COTREE ? 1.0f : 0.5f;
+					glm::vec4 noncon_color = k > 0 ? glm::vec4{ 1.0f, b, a, alpha } : glm::vec4{ a, b, 1.0f, alpha };
 
+					wireframe_shader.bind();
+					glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
+					glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(noncon_color));
+					glLineWidth(12);
+
+					glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_noncon.vbo);
+					glBindVertexArray(mesh_buffer_noncon.vao);
+					glVertexAttribPointer(wireframe_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+					glDrawElements(GL_LINES, mesh_buffer_noncon.indices_amount, GL_UNSIGNED_INT, 0);
+					glBindBuffer(GL_ARRAY_BUFFER, 0);
+					glBindVertexArray(0);
+				}
+			}
+
+			if (stage == TEST_CYCLES) {
+				if (dual_edges_path.size()) {
+					if (show_travel_original) {
+						// Draw travel vector (original)
 						wireframe_shader.bind();
+						glm::vec4 red{ 1.0f, 0.1f, 0.1f, 1.0f };
 						glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
-						glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(noncon_color));
-						glLineWidth(12);
+						glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(red));
+						glLineWidth(8);
 
-						glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_noncon.vbo);
-						glBindVertexArray(mesh_buffer_noncon.vao);
+						glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_travel_vector_original.vbo);
+						glBindVertexArray(mesh_buffer_travel_vector_original.vao);
 						glVertexAttribPointer(wireframe_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
-						glDrawElements(GL_LINES, mesh_buffer_noncon.indices_amount, GL_UNSIGNED_INT, 0);
+						glDrawElements(GL_LINES, mesh_buffer_travel_vector_original.indices_amount, GL_UNSIGNED_INT, 0);
+						glBindBuffer(GL_ARRAY_BUFFER, 0);
+						glBindVertexArray(0);
+					}
+
+					if (show_travel_adjusted) {
+						// Draw travel vector (adjusted)
+						wireframe_shader.bind();
+						glm::vec4 blue{ 0.1f, 0.4f, 1.0f, 1.0f };
+						glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
+						glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(blue));
+						glLineWidth(8);
+
+						glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_travel_vector_adjusted.vbo);
+						glBindVertexArray(mesh_buffer_travel_vector_adjusted.vao);
+						glVertexAttribPointer(wireframe_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+						glDrawElements(GL_LINES, mesh_buffer_travel_vector_adjusted.indices_amount, GL_UNSIGNED_INT, 0);
+						glBindBuffer(GL_ARRAY_BUFFER, 0);
+						glBindVertexArray(0);
+					}
+
+					if (show_travel_original) {
+						// Draw travel field (original)
+						wireframe_shader.bind();
+						glm::vec4 red_transparent{ 1.0f, 0.1f, 0.1f, 0.3f };
+						glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
+						glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(red_transparent));
+						glLineWidth(5);
+
+						glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_travel_field_original.vbo);
+						glBindVertexArray(mesh_buffer_travel_field_original.vao);
+						glVertexAttribPointer(wireframe_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+						glDrawElements(GL_LINES, mesh_buffer_travel_field_original.indices_amount, GL_UNSIGNED_INT, 0);
+						glBindBuffer(GL_ARRAY_BUFFER, 0);
+						glBindVertexArray(0);
+					}
+
+					if (show_travel_adjusted) {
+						// Draw travel field (adjusted)
+						wireframe_shader.bind();
+						glm::vec4 blue_transparent{ 0.1f, 0.4f, 1.0f, 0.35f };
+						glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
+						glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(blue_transparent));
+						glLineWidth(5);
+
+						glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_travel_field_adjusted.vbo);
+						glBindVertexArray(mesh_buffer_travel_field_adjusted.vao);
+						glVertexAttribPointer(wireframe_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+						glDrawElements(GL_LINES, mesh_buffer_travel_field_adjusted.indices_amount, GL_UNSIGNED_INT, 0);
 						glBindBuffer(GL_ARRAY_BUFFER, 0);
 						glBindVertexArray(0);
 					}
 				}
+			}
 
+			if (stage == TREE_COTREE) {
 				// Draw tree
 				if (show_tree) {
 					wireframe_shader.bind();

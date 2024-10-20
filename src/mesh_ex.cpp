@@ -13,6 +13,13 @@ MeshEx MeshEx::fromMesh(const Mesh mesh)
 		// Initialize face vertices
 		int f_idx = result.faces.size();
 		result.faces.push_back({ f_old });
+		FaceEx& f = result.faces[result.faces.size() - 1];
+
+		// Calculate face normal
+		glm::vec3 v_pos_a = result.vertices[f.vertices[0]].position;
+		glm::vec3 v_pos_b = result.vertices[f.vertices[1]].position;
+		glm::vec3 v_pos_c = result.vertices[f.vertices[2]].position;
+		f.normal = glm::normalize(glm::cross(v_pos_b - v_pos_a, v_pos_c - v_pos_a));
 
 		for (int i = 0; i < 3; i++) {
 			int v_idx_a = f_old[i];
@@ -234,7 +241,7 @@ double MeshEx::defectAroundVertex(int v_idx) const {
 }
 
 double MeshEx::angleOnPath(std::vector<int> path) const {
-	double angle = 0.0f;
+	float angle = 0.0;
 	for (int i = 0; i < path.size(); i++) {
 		int e_a_idx = path[i];
 		int e_b_idx = path[(i + 1) % path.size()];
@@ -246,7 +253,7 @@ double MeshEx::angleOnPath(std::vector<int> path) const {
 }
 
 double MeshEx::angleOnPathAdjusted(std::vector<int> path, std::vector<double> adjustment_angles) const {
-	double angle = 0.0f;
+	double angle = 0.0;
 	for (int i = 0; i < path.size(); i++) {
 		int e_a_idx = path[i];
 		int e_b_idx = path[(i + 1) % path.size()];

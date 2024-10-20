@@ -33,6 +33,7 @@ struct EdgeEx {
 
 struct FaceEx {
 	glm::uvec3 vertices;
+	glm::vec3 normal;
 
 	std::vector<int> edges = {};
 
