@@ -58,14 +58,15 @@ struct MeshEx {
 
 	glm::vec3 vertexToVertex(int v_src_idx, int v_dst_idx) const;
 	glm::vec3 edgeVector(int e_idx) const;
-	double angleBetweenEdges(int e_a_idx, int e_b_idx) const;
-	double signedAngleBetweenEdges(int e_a_idx, int e_b_idx) const;
-	glm::vec3 centerOfMass(int f_idx) const;
-	int edgesFormChain(int e_a_idx, int e_b_idx) const;
-	int edgeOrientation(int e_a_idx, int e_b_idx) const;
 
 	glm::vec3 circumcircleCenter(int f_idx) const;
-	double defectAroundVertex(int v_idx) const;
+	glm::vec3 centerOfMass(int f_idx) const;
+
+	int edgePointToEdge(int e_a_idx, int e_b_idx) const;
+	int edgeOrientationInTriangle(int e_a_idx, int e_b_idx) const;
+
+	double turnAngleBetweenEdges(int e_a_idx, int e_b_idx) const;
+	double innerAngleBetweenEdges(int e_a_idx, int e_b_idx) const;
 	double angleOnPath(std::vector<int> path) const;
 	double angleOnPathAdjusted(std::vector<int> path, std::vector<double> adjustment_angles) const;
 };

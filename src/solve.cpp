@@ -26,7 +26,6 @@ std::vector<double> calculateAdjustmentAngles(const MeshEx& mesh_ex, std::vector
         const std::vector<int>& cycle_edges = cycle_data.first;
         const int k = cycle_data.second;
 
-        double angle = 0.0f;
         for (int i = 0; i < cycle_edges.size(); i++) {
             int e_a_idx = cycle_edges[i];
             int e_b_idx = cycle_edges[(i + 1) % cycle_edges.size()];
@@ -35,11 +34,10 @@ std::vector<double> calculateAdjustmentAngles(const MeshEx& mesh_ex, std::vector
             int f_from_idx = mesh_ex.otherFace(e_a_idx, f_to_idx);
             double value = f_from_idx < f_to_idx ? 1.0 : -1.0;
             A_entries.push_back(Eigen::Triplet<double>(cycle_idx, e_a_idx, value));
-
-            angle += mesh_ex.signedAngleBetweenEdges(e_a_idx, e_b_idx);
         }
+        double defect = mesh_ex.angleOnPath(cycle_edges);
 
-        b_entries.push_back(2 * glm::pi<double>() * k - angle);
+        b_entries.push_back(2 * glm::pi<double>() * k - defect);
     }
 
     Eigen::SparseMatrix<double> A(cycles.size(), mesh_ex.edges.size());
@@ -48,7 +46,7 @@ std::vector<double> calculateAdjustmentAngles(const MeshEx& mesh_ex, std::vector
     for (int i = 0; i < cycles.size(); i++)
         b[i] = b_entries[i];
 
-    Eigen::SparseQR<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> solver;
+    Eigen::SparseLU<Eigen::SparseMatrix<double>> solver;
     solver.compute(A * A.transpose());
     Eigen::VectorXd u = solver.solve(b);
     Eigen::VectorXd x = A.transpose() * u;

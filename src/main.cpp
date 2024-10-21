@@ -46,7 +46,7 @@ enum Stage {
 	CHOOSE_MESH,
 	VERTEX_K,
 	TREE_COTREE,
-	TEST_CYCLES,
+	INSPECT_RESULT,
 
 	STAGE_NR_ITEMS
 };
@@ -119,6 +119,7 @@ int main(int argc, char** argv)
 	MeshBuffer mesh_buffer_tree = MeshBuffer::empty();
 	MeshBuffer mesh_buffer_cotree = MeshBuffer::empty();
 	std::vector<MeshBuffer> mesh_buffers_noncon;
+	MeshBuffer mesh_buffer_field = MeshBuffer::empty();
 	MeshBuffer mesh_buffer_travel_vector_original = MeshBuffer::empty();
 	MeshBuffer mesh_buffer_travel_field_original = MeshBuffer::empty();
 	MeshBuffer mesh_buffer_travel_vector_adjusted = MeshBuffer::empty();
@@ -158,7 +159,7 @@ int main(int argc, char** argv)
 	int selected_noncon_item_idx = 0;
 	std::vector<std::string> noncon_items;
 	float travel_speed = 0.01f;
-	float travel_start_angle = 0.0f;
+	float start_angle = 0.0f;
 	bool show_travel_original = true;
 	bool show_travel_adjusted = true;
 	bool show_singularity_data = true;
@@ -177,7 +178,10 @@ int main(int argc, char** argv)
 	double curvature_partition;
 	double curvature_partition_adjusted;
 
-	// Travel 
+	// Field
+	std::vector<double> field_angles;
+
+	// Travel
 	std::vector<glm::vec3> travel_path;
 	std::vector<glm::vec3> travel_normals;
 	std::vector<double> travel_angles_original;
@@ -215,7 +219,7 @@ int main(int argc, char** argv)
 				return;
 			}
 		}
-		else if (stage == TEST_CYCLES) {
+		else if (stage == INSPECT_RESULT) {
 			if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
 				clicking_edge = 2;
 				return;
@@ -231,13 +235,13 @@ int main(int argc, char** argv)
 		"Choosing Mesh",
 		"Setting Singularities",
 		"Tree-Cotree Decomposition",
-		"Test Cycles",
+		"Inspect Results",
 	};
 	const std::array<std::string, 4> stage_descriptions{
 		"Select a mesh to construct a\n  vector field on.",
 		"Set the singularities of each\n  vertex.\nSelect a vertex by holding\n  SHIFT and clicking on the\n  mesh.\nIncrease or decrease its index\n  in the GUI.",
 		"View the tree and cotree\n  generated for this mesh.\nHighlight a noncontractible\n  cycle in the GUI.\nIncrease or decrease its index\n  in the GUI.",
-		"Draw a cycle by selecting a\n  set of edges.\nSelect an edge by holding SHIFT\n  and clicking on the mesh.\nInspect data about the cycle\n  in the GUI.",
+		"Inspect the vector field.\nDraw a cycle by selecting a\n  set of edges.\nSelect an edge by holding SHIFT\n  and clicking on the mesh.\nInspect data about the cycle\n  in the GUI.",
 	};
 
 	// Method for loading new mesh
@@ -396,7 +400,7 @@ int main(int argc, char** argv)
 					selected_noncon_item_idx = 0;
 					dual_edges_reload = true;
 
-					if (stage == TEST_CYCLES) {
+					if (stage == INSPECT_RESULT) {
 						dual_edges_reload = true;
 						std::vector<std::pair<std::vector<int>, int>> cycles = getCycles(mesh_ex, noncon_cycles, noncon_ks);
 						adjustment_angles = calculateAdjustmentAngles(mesh_ex, cycles);
@@ -477,20 +481,21 @@ int main(int argc, char** argv)
 					ImGui::TextColored(ImVec4(1.0, 1.0, 0.2, 1.0), "This must be fixed before\n  proceeding to the next step");
 				}
 			}
-			else if (stage == TEST_CYCLES) {
+			else if (stage == INSPECT_RESULT) {
 				if (ImGui::Button("Clear", ImVec2(width, 19))) {
 					dual_edges_selected = {};
 					for (int e_idx = 0; e_idx < mesh_ex.edges.size(); e_idx++)
 						dual_edges_selected.push_back(false);
 					dual_edges_reload = true;
 				}
+				ImGui::SliderFloat("Angle", &start_angle, 0.0f, 2 * glm::pi<float>());
 				ImGui::Checkbox("Show singularity data", &show_singularity_data);
 				if (!dual_edges_path.empty()) {
 					int num_rotations = glm::round(0.5 * curvature_partition_adjusted / glm::pi<double>());
 
 					ImGui::TextColored(ImVec4(0.2, 1.0, 0.4, 1.0), "Cycle complete");
-					ImGui::Text(is_noncon ? "  Type   = Noncontractible" : "  Type   = Contractible");
-					ImGui::Text("  #Edges   = %i", dual_edges_path.size());
+					ImGui::Text(is_noncon ? "  Type       = Noncontractible" : "  Type       = Contractible");
+					ImGui::Text("  #Edges     = %i", dual_edges_path.size());
 					ImGui::Text("  Rotation");
 					ImGui::Text("    Original = %f", curvature_partition);
 					ImGui::Text("    Adjusted = %f", curvature_partition_adjusted);
@@ -498,7 +503,6 @@ int main(int argc, char** argv)
 					ImGui::Checkbox("Show original vectors", &show_travel_original);
 					ImGui::Checkbox("Show adjusted vectors", &show_travel_adjusted);
 					ImGui::SliderFloat("Speed", &travel_speed, 0.0f, 0.05f);
-					ImGui::SliderFloat("Angle", &travel_start_angle, 0.0f, 2 * glm::pi<float>());
 				}
 				else {
 					ImGui::TextColored(ImVec4(1.0, 0.4, 0.2, 1.0), "Cycle incomplete");
@@ -510,7 +514,7 @@ int main(int argc, char** argv)
 		}
 
 		// Logic
-		if (stage == TEST_CYCLES) {
+		if (stage == INSPECT_RESULT) {
 			if (clicking_edge) {
 				const auto opt_world_point = getWorldPositionOfPixel(trackball, window.getCursorPixel());
 				if (opt_world_point) {
@@ -528,6 +532,13 @@ int main(int argc, char** argv)
 			}
 
 			if (dual_edges_reload) {
+				travel_path = {};
+				travel_path = {};
+				travel_normals = {};
+				travel_angles_original = { 0.0f };
+				travel_angles_adjusted = { 0.0f };
+				travel_angle_adjustments = {};
+
 				// Trace cycle
 				dual_edges_path = {};
 				std::vector<std::vector<int>> edges_per_face(mesh_ex.faces.size());
@@ -635,14 +646,46 @@ int main(int argc, char** argv)
 							dual_edges_indices.push_back(dual_edges_positions.size() - 1);
 						}
 					}
+
+					// Field
+					std::vector<bool> seen;
+					field_angles = {};
+					for (int f_idx = 0; f_idx < mesh_ex.faces.size(); f_idx++) {
+						seen.push_back(f_idx == 0);
+						field_angles.push_back(0.0);
+					}
+					std::queue<int> queue = {};
+					queue.push(0);
+					while (!queue.empty()) {
+						int f_curr_idx = queue.front();
+						queue.pop();
+						const FaceEx& f_curr = mesh_ex.faces[f_curr_idx];
+
+						for (int e_b_idx : f_curr.edges) {
+							int f_next_idx = mesh_ex.otherFace(e_b_idx, f_curr_idx);
+							if (seen[f_next_idx])
+								continue;
+							seen[f_next_idx] = true;
+
+							const FaceEx& f_next = mesh_ex.faces[f_next_idx];
+							int e_a_idx = f_curr.edges[0];
+							int e_c_idx = f_next.edges[0];
+
+							const EdgeEx& e_b = mesh_ex.edges[e_b_idx];
+							double angle_adjustment = adjustment_angles[e_b_idx];
+							if (e_b.faces[0] == f_next_idx)
+								angle_adjustment = -angle_adjustment;
+
+							field_angles[f_next_idx] = field_angles[f_curr_idx]
+								+ mesh_ex.turnAngleBetweenEdges(e_a_idx, e_b_idx)
+								+ glm::pi<float>() - angle_adjustment
+								+ mesh_ex.turnAngleBetweenEdges(e_b_idx, e_c_idx);
+							queue.push(f_next_idx);
+						}
+					}
 				}
 				else {
 					// Complete path (tighter)
-					travel_path = {};
-					travel_normals = {};
-					travel_angles_original = { 0.0f };
-					travel_angles_adjusted = { 0.0f };
-					travel_angle_adjustments = {};
 					for (int i = 0; i < dual_edges_path.size(); i++) {
 						int e_a_idx = dual_edges_path[i];
 						int e_b_idx = dual_edges_path[(i + 1) % dual_edges_path.size()];
@@ -709,8 +752,8 @@ int main(int argc, char** argv)
 					angle_adjusted += travel_angle_adjustments[travel_index] * glm::max(0.0f, travel_frac - 0.5f);
 
 					glm::vec3 origin = pos_a * (1.0f - travel_frac) + pos_b * travel_frac + normal * 0.01f;;
-					glm::vec3 direction_original = glm::rotate(glm::normalize(pos_b - pos_a), travel_start_angle + angle_original, normal);
-					glm::vec3 direction_adjusted = glm::rotate(glm::normalize(pos_b - pos_a), travel_start_angle + angle_adjusted, normal);
+					glm::vec3 direction_original = glm::rotate(glm::normalize(pos_b - pos_a), start_angle + angle_original, normal);
+					glm::vec3 direction_adjusted = glm::rotate(glm::normalize(pos_b - pos_a), start_angle + angle_adjusted, normal);
 
 					double edge_length = glm::length(pos_b - pos_a);
 					travel_frac += travel_speed / edge_length;
@@ -739,8 +782,8 @@ int main(int argc, char** argv)
 						float angle_adjusted = travel_angles_adjusted[i];
 
 						glm::vec3 origin = 0.5f * (pos_a + pos_b) + normal * 0.01f;
-						glm::vec3 direction_original = glm::rotate(glm::normalize(pos_b - pos_a), travel_start_angle + angle_original, normal);
-						glm::vec3 direction_adjusted = glm::rotate(glm::normalize(pos_b - pos_a), travel_start_angle + angle_adjusted, normal);
+						glm::vec3 direction_original = glm::rotate(glm::normalize(pos_b - pos_a), start_angle + angle_original, normal);
+						glm::vec3 direction_adjusted = glm::rotate(glm::normalize(pos_b - pos_a), start_angle + angle_adjusted, normal);
 
 						travel_field_original_positions.push_back(origin);
 						travel_field_original_positions.push_back(origin + direction_original * 0.1f);
@@ -754,6 +797,28 @@ int main(int argc, char** argv)
 					}
 					mesh_buffer_travel_field_original.load(travel_field_original_positions, travel_field_original_indices);
 					mesh_buffer_travel_field_adjusted.load(travel_field_adjusted_positions, travel_field_adjusted_indices);
+				}
+			}
+			else {
+				// Create field data for rendering
+				{
+					std::vector<glm::vec3> field_positions;
+					std::vector<int> field_indices;
+
+					for (int f_idx = 0; f_idx < mesh_ex.faces.size(); f_idx++) {
+						const FaceEx& f = mesh_ex.faces[f_idx];
+						glm::vec3 normal = f.normal;
+						float angle = field_angles[f_idx];
+
+						glm::vec3 origin = mesh_ex.centerOfMass(f_idx);
+						glm::vec3 direction = glm::rotate(glm::normalize(mesh_ex.vertexToVertex(f.vertices[0], f.vertices[1])), start_angle + angle, normal);
+
+						field_positions.push_back(origin);
+						field_positions.push_back(origin + direction * 0.1f);
+						field_indices.push_back(field_positions.size() - 2);
+						field_indices.push_back(field_positions.size() - 1);
+					}
+					mesh_buffer_field.load(field_positions, field_indices);
 				}
 			}
 		}
@@ -787,7 +852,7 @@ int main(int argc, char** argv)
 		std::vector<SingularityUniform> singularity_uniforms = {};
 		int singularity_amount = 0;
 		GLuint singularity_ubo;
-		if (stage == VERTEX_K || stage >= TEST_CYCLES) {
+		if (stage == VERTEX_K || stage >= INSPECT_RESULT) {
 			// Set vertex uniform data for instanced singularity drawing
 			for (int v_idx = 0; v_idx < mesh_ex.vertices.size(); v_idx++)
 				singularity_uniforms.push_back(SingularityUniform::fromVertexEx(mesh_ex, v_idx));
@@ -820,12 +885,12 @@ int main(int argc, char** argv)
 			glBindBuffer(GL_ARRAY_BUFFER, 0);
 			glBindVertexArray(0);
 
-			if (stage == TEST_CYCLES) {
+			if (stage == INSPECT_RESULT) {
 				if (dual_edges_path.size()) {
 					if (show_travel_original) {
 						// Draw travel vector (original)
 						wireframe_shader.bind();
-						glm::vec4 red_transparent{ 1.0f, 0.1f, 0.1f, 0.35f };
+						glm::vec4 red_transparent{ 1.0f, 0.2f, 0.2f, 0.35f };
 						glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
 						glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(red_transparent));
 						glLineWidth(8);
@@ -901,7 +966,7 @@ int main(int argc, char** argv)
 			}
 
 			// Draw cycle background
-			if (stage == TEST_CYCLES) {
+			if (stage == INSPECT_RESULT) {
 				wireframe_shader.bind();
 				glm::vec4 red_transparent{ 1.0f, 0.2f, 0.2f, 0.35f };
 				glm::vec4 green_transparent{ 0.2f, 1.0f, 0.2f, 0.35f };
@@ -923,7 +988,7 @@ int main(int argc, char** argv)
 
 		// Draw foreground
 		{
-			if (stage == VERTEX_K || (stage == TEST_CYCLES && show_singularity_data)) {
+			if (stage == VERTEX_K || (stage == INSPECT_RESULT && show_singularity_data)) {
 				float alpha = stage == VERTEX_K ? 1.0f : 0.5f;
 
 				// Draw singularity vertices
@@ -942,7 +1007,7 @@ int main(int argc, char** argv)
 				glBindVertexArray(0);
 			}
 
-			if ((stage == TREE_COTREE && show_noncons) || (stage == TEST_CYCLES && show_singularity_data)) {
+			if ((stage == TREE_COTREE && show_noncons) || (stage == INSPECT_RESULT && show_singularity_data)) {
 				int selected_noncon_idx = -1;
 
 				if (stage == TREE_COTREE) {
@@ -979,7 +1044,7 @@ int main(int argc, char** argv)
 					int k = noncon_ks[i];
 					float a = pow(0.6, abs(k));
 					float b = pow(0.9, abs(k));
-					if (stage == TEST_CYCLES && k == 0)
+					if (stage == INSPECT_RESULT && k == 0)
 						continue;
 					float alpha = stage == TREE_COTREE ? 1.0f : 0.5f;
 					glm::vec4 noncon_color = k > 0 ? glm::vec4{ 1.0f, b, a, alpha } : glm::vec4{ a, b, 1.0f, alpha };
@@ -998,12 +1063,12 @@ int main(int argc, char** argv)
 				}
 			}
 
-			if (stage == TEST_CYCLES) {
-				if (dual_edges_path.size()) {
+			if (stage == INSPECT_RESULT) {
+				if (!dual_edges_path.empty()) {
 					if (show_travel_original) {
 						// Draw travel vector (original)
 						wireframe_shader.bind();
-						glm::vec4 red{ 1.0f, 0.1f, 0.1f, 1.0f };
+						glm::vec4 red{ 1.0f, 0.2f, 0.2f, 1.0f };
 						glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
 						glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(red));
 						glLineWidth(8);
@@ -1035,7 +1100,7 @@ int main(int argc, char** argv)
 					if (show_travel_original) {
 						// Draw travel field (original)
 						wireframe_shader.bind();
-						glm::vec4 red_transparent{ 1.0f, 0.1f, 0.1f, 0.3f };
+						glm::vec4 red_transparent{ 1.0f, 0.2f, 0.2f, 0.35f };
 						glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
 						glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(red_transparent));
 						glLineWidth(5);
@@ -1064,15 +1129,33 @@ int main(int argc, char** argv)
 						glBindVertexArray(0);
 					}
 				}
+				else {
+					// Draw field
+					wireframe_shader.bind();
+					glm::vec4 blue_transparent{ 0.1f, 0.4f, 1.0f, 1.0f };
+					glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
+					glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(blue_transparent));
+					glLineWidth(5);
+					glPointSize(10);
+
+					glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_field.vbo);
+					glBindVertexArray(mesh_buffer_field.vao);
+					glVertexAttribPointer(wireframe_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+					glDrawElements(GL_LINES, mesh_buffer_field.indices_amount, GL_UNSIGNED_INT, 0);
+					glVertexAttribPointer(wireframe_shader.getAttributeLocation("pos"), 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3) * 2, (void*)0);
+					glDrawElements(GL_POINTS, mesh_buffer_field.indices_amount / 2, GL_UNSIGNED_INT, 0);
+					glBindBuffer(GL_ARRAY_BUFFER, 0);
+					glBindVertexArray(0);
+				}
 			}
 
 			if (stage == TREE_COTREE) {
 				// Draw tree
 				if (show_tree) {
 					wireframe_shader.bind();
-					glm::vec4 orange{ 0.4f, 1.0f, 0.2f, 1.0f };
+					glm::vec4 green{ 0.2f, 1.0f, 0.2f, 1.0f };
 					glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
-					glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(orange));
+					glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(green));
 					glLineWidth(8);
 
 					glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_tree.vbo);
@@ -1086,9 +1169,9 @@ int main(int argc, char** argv)
 				if (show_cotree) {
 					// Draw cotree
 					wireframe_shader.bind();
-					glm::vec4 blue{ 0.8f, 0.2f, 1.0f, 1.0f };
+					glm::vec4 magenta{ 0.8f, 0.2f, 1.0f, 1.0f };
 					glUniformMatrix4fv(wireframe_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
-					glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(blue));
+					glUniform4fv(wireframe_shader.getUniformLocation("albedo"), 1, glm::value_ptr(magenta));
 					glLineWidth(8);
 
 					glBindBuffer(GL_ARRAY_BUFFER, mesh_buffer_cotree.vbo);
@@ -1100,7 +1183,7 @@ int main(int argc, char** argv)
 				}
 			}
 
-			if (stage == TEST_CYCLES) {
+			if (stage == INSPECT_RESULT) {
 				// Draw cycle
 				wireframe_shader.bind();
 				glm::vec4 red{ 1.0f, 0.2f, 0.2f, 1.0f };
