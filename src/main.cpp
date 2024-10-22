@@ -159,7 +159,7 @@ int main(int argc, char** argv)
 	int selected_noncon_item_idx = 0;
 	std::vector<std::string> noncon_items;
 	float travel_speed = 0.01f;
-	float start_angle = 0.0f;
+	float start_angle = 0.0f, start_angle_prev = 0.0f;
 	bool show_travel_original = true;
 	bool show_travel_adjusted = true;
 	bool show_singularity_data = true;
@@ -180,6 +180,7 @@ int main(int argc, char** argv)
 
 	// Field
 	std::vector<double> field_angles;
+	bool field_travel_reload = false;
 
 	// Travel
 	std::vector<glm::vec3> travel_path;
@@ -189,6 +190,7 @@ int main(int argc, char** argv)
 	std::vector<double> travel_angle_adjustments;
 	int travel_index;
 	float travel_frac;
+	float travel_vector_length = 0.2f, travel_vector_length_prev = 0.2f;
 
 	// Handle key press
 	window.registerKeyCallback([&](int key, int scancode, int action, int mods) {
@@ -362,14 +364,12 @@ int main(int argc, char** argv)
 		int total_k = 0;
 		for (const VertexEx& v : mesh_ex.vertices)
 			total_k += v.k;
-		for (const int k : noncon_ks)
-			total_k += k;
 		int euler_mesh_characteristic = mesh_ex.vertices.size() - mesh_ex.edges.size() + mesh_ex.faces.size();
 
 		// Stage checks
 		bool prev_enabled = stage > 0;
 		bool next_enabled = stage < STAGE_NR_ITEMS - 1;
-		if (stage == TREE_COTREE) {
+		if (stage == VERTEX_K) {
 			if (total_k != euler_mesh_characteristic)
 				next_enabled = false;
 		}
@@ -424,6 +424,8 @@ int main(int argc, char** argv)
 					mesh_name = "what";
 				if (ImGui::Button("Bunny (g = 0)", ImVec2(width, 19)))
 					mesh_name = "bunny";
+				if (ImGui::Button("Spot (g = 0)", ImVec2(width, 19)))
+					mesh_name = "spot";
 
 				if (!mesh_name.empty())
 					loadMainMesh(mesh_name);
@@ -448,7 +450,6 @@ int main(int argc, char** argv)
 				else {
 					ImGui::TextColored(ImVec4(1.0, 0.4, 0.2, 1.0), "Poincare-Hopf not satisfied");
 					ImGui::Text("  sum(k) = %i != %i = 2-2g", total_k, euler_mesh_characteristic);
-					ImGui::TextColored(ImVec4(1.0, 1.0, 0.2, 1.0), "This can still be fixed in the\n  next step");
 				}
 			}
 			else if (stage == TREE_COTREE) {
@@ -470,16 +471,6 @@ int main(int argc, char** argv)
 						ImGui::Unindent();
 					}
 				}
-				ImGui::Separator();
-				if (total_k == euler_mesh_characteristic) {
-					ImGui::TextColored(ImVec4(0.2, 1.0, 0.4, 1.0), "Poincare-Hopf satisfied");
-					ImGui::Text("  sum(k) = %i == %i = 2-2g", total_k, euler_mesh_characteristic);
-				}
-				else {
-					ImGui::TextColored(ImVec4(1.0, 0.4, 0.2, 1.0), "Poincare-Hopf not satisfied");
-					ImGui::Text("  sum(k) = %i != %i = 2-2g", total_k, euler_mesh_characteristic);
-					ImGui::TextColored(ImVec4(1.0, 1.0, 0.2, 1.0), "This must be fixed before\n  proceeding to the next step");
-				}
 			}
 			else if (stage == INSPECT_RESULT) {
 				if (ImGui::Button("Clear", ImVec2(width, 19))) {
@@ -488,7 +479,8 @@ int main(int argc, char** argv)
 						dual_edges_selected.push_back(false);
 					dual_edges_reload = true;
 				}
-				ImGui::SliderFloat("Angle", &start_angle, 0.0f, 2 * glm::pi<float>());
+				ImGui::SliderFloat("Base Angle", &start_angle, 0.0f, 2 * glm::pi<float>());
+				ImGui::SliderFloat("Vector Length", &travel_vector_length, 0.01f, 0.5f);
 				ImGui::Checkbox("Show singularity data", &show_singularity_data);
 				if (!dual_edges_path.empty()) {
 					int num_rotations = glm::round(0.5 * curvature_partition_adjusted / glm::pi<double>());
@@ -502,7 +494,7 @@ int main(int argc, char** argv)
 					ImGui::Text("      %i rotation(s)", num_rotations);
 					ImGui::Checkbox("Show original vectors", &show_travel_original);
 					ImGui::Checkbox("Show adjusted vectors", &show_travel_adjusted);
-					ImGui::SliderFloat("Speed", &travel_speed, 0.0f, 0.05f);
+					ImGui::SliderFloat("Speed", &travel_speed, -0.05f, 0.05f);
 				}
 				else {
 					ImGui::TextColored(ImVec4(1.0, 0.4, 0.2, 1.0), "Cycle incomplete");
@@ -734,6 +726,13 @@ int main(int argc, char** argv)
 				travel_frac = 0.5f;
 
 				dual_edges_reload = false;
+				field_travel_reload = true;
+			}
+
+			if (start_angle_prev != start_angle || travel_vector_length_prev != travel_vector_length) {
+				start_angle_prev = start_angle;
+				travel_vector_length_prev = travel_vector_length;
+				field_travel_reload = true;
 			}
 
 			if (!travel_path.empty()) {
@@ -751,24 +750,28 @@ int main(int argc, char** argv)
 					angle_adjusted -= travel_angle_adjustments[(travel_index + travel_angle_adjustments.size() - 1) % travel_angle_adjustments.size()] * glm::max(0.0f, 0.5f - travel_frac);
 					angle_adjusted += travel_angle_adjustments[travel_index] * glm::max(0.0f, travel_frac - 0.5f);
 
-					glm::vec3 origin = pos_a * (1.0f - travel_frac) + pos_b * travel_frac + normal * 0.01f;;
+					glm::vec3 origin = pos_a * (1.0f - travel_frac) + pos_b * travel_frac + normal * 0.01f;
 					glm::vec3 direction_original = glm::rotate(glm::normalize(pos_b - pos_a), start_angle + angle_original, normal);
 					glm::vec3 direction_adjusted = glm::rotate(glm::normalize(pos_b - pos_a), start_angle + angle_adjusted, normal);
 
 					double edge_length = glm::length(pos_b - pos_a);
 					travel_frac += travel_speed / edge_length;
-					if (travel_frac >= 1.0f) {
+					if (travel_frac > 1.0f) {
 						travel_index = (travel_index + 1) % travel_path.size();
 						travel_frac = 0.0f;
 					}
+					else if (travel_frac < 0.0f) {
+						travel_index = (travel_index + travel_path.size() - 1) % travel_path.size();
+						travel_frac = 1.0f;
+					}
 
 					// Create travel vector data for rendering
-					mesh_buffer_travel_vector_original.load({ origin, origin + direction_original * 0.2f }, { 0, 1 });
-					mesh_buffer_travel_vector_adjusted.load({ origin, origin + direction_adjusted * 0.2f }, { 0, 1 });
+					mesh_buffer_travel_vector_original.load({ origin, origin + direction_original * travel_vector_length }, { 0, 1 });
+					mesh_buffer_travel_vector_adjusted.load({ origin, origin + direction_adjusted * travel_vector_length }, { 0, 1 });
 				}
 
 				// Create travel field data for rendering
-				{
+				if (field_travel_reload) {
 					std::vector<glm::vec3> travel_field_original_positions;
 					std::vector<int> travel_field_original_indices;
 					std::vector<glm::vec3> travel_field_adjusted_positions;
@@ -786,12 +789,12 @@ int main(int argc, char** argv)
 						glm::vec3 direction_adjusted = glm::rotate(glm::normalize(pos_b - pos_a), start_angle + angle_adjusted, normal);
 
 						travel_field_original_positions.push_back(origin);
-						travel_field_original_positions.push_back(origin + direction_original * 0.1f);
+						travel_field_original_positions.push_back(origin + direction_original * travel_vector_length * 0.5f);
 						travel_field_original_indices.push_back(travel_field_original_positions.size() - 2);
 						travel_field_original_indices.push_back(travel_field_original_positions.size() - 1);
 
 						travel_field_adjusted_positions.push_back(origin);
-						travel_field_adjusted_positions.push_back(origin + direction_adjusted * 0.1f);
+						travel_field_adjusted_positions.push_back(origin + direction_adjusted * travel_vector_length * 0.5f);
 						travel_field_adjusted_indices.push_back(travel_field_adjusted_positions.size() - 2);
 						travel_field_adjusted_indices.push_back(travel_field_adjusted_positions.size() - 1);
 					}
@@ -801,7 +804,7 @@ int main(int argc, char** argv)
 			}
 			else {
 				// Create field data for rendering
-				{
+				if (field_travel_reload) {
 					std::vector<glm::vec3> field_positions;
 					std::vector<int> field_indices;
 
@@ -814,13 +817,15 @@ int main(int argc, char** argv)
 						glm::vec3 direction = glm::rotate(glm::normalize(mesh_ex.vertexToVertex(f.vertices[0], f.vertices[1])), start_angle + angle, normal);
 
 						field_positions.push_back(origin);
-						field_positions.push_back(origin + direction * 0.1f);
+						field_positions.push_back(origin + direction * travel_vector_length * 0.5f);
 						field_indices.push_back(field_positions.size() - 2);
 						field_indices.push_back(field_positions.size() - 1);
 					}
 					mesh_buffer_field.load(field_positions, field_indices);
 				}
 			}
+
+			field_travel_reload = false;
 		}
 
 		// Reset screen buffers
