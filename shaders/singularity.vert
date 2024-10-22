@@ -7,6 +7,7 @@ struct Vertex {
 
 uniform mat4 mvp;
 uniform int selected_vertex_idx;
+uniform vec3 camera_pos;
 layout(std140) uniform vertex_buffer
 {
     int vertex_amount;
@@ -22,8 +23,10 @@ out int k;
 
 void main() {
     Vertex v = vertices[gl_InstanceID];
-    vec3 worldPos = (pos * (selected_vertex_idx == gl_InstanceID ? SELECTED_RADIUS : RADIUS)) + v.position;
-    gl_Position = mvp * vec4(worldPos, 1);
+    float dist = length(camera_pos - v.position);
+    float scale = min(0.4f * dist, 1.0f);
+    vec3 world_pos = (pos * (selected_vertex_idx == gl_InstanceID ? SELECTED_RADIUS : RADIUS) * scale) + v.position;
+    gl_Position = mvp * vec4(world_pos, 1);
 
     k = v.k;
 }

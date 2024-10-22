@@ -834,7 +834,7 @@ int main(int argc, char** argv)
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
 		// Get camera data
-		const glm::vec3 cameraPos = trackball.position();
+		const glm::vec3 camera_pos = trackball.position();
 		const glm::mat4 model{ 1.0f };
 		const glm::mat4 view = trackball.viewMatrix();
 		const glm::mat4 projection = trackball.projectionMatrix();
@@ -931,6 +931,7 @@ int main(int argc, char** argv)
 				singularity_shader.bind();
 				glUniformMatrix4fv(singularity_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
 				glUniform1i(singularity_shader.getUniformLocation("selected_vertex_idx"), selected_vertex_idx);
+				glUniform1i(singularity_shader.getUniformLocation("selected_vertex_idx"), selected_vertex_idx);
 				glUniform1i(singularity_shader.getUniformLocation("draw_zero_k"), stage == VERTEX_K);
 				glUniform1f(singularity_shader.getUniformLocation("alpha"), 0.35f);
 				singularity_shader.bindUniformBlock("vertex_buffer", 0, singularity_ubo);
@@ -1000,6 +1001,7 @@ int main(int argc, char** argv)
 				singularity_shader.bind();
 				glUniformMatrix4fv(singularity_shader.getUniformLocation("mvp"), 1, GL_FALSE, glm::value_ptr(mvp));
 				glUniform1i(singularity_shader.getUniformLocation("selected_vertex_idx"), selected_vertex_idx);
+				glUniform3fv(singularity_shader.getUniformLocation("camera_pos"), 1, glm::value_ptr(camera_pos));
 				glUniform1i(singularity_shader.getUniformLocation("draw_zero_k"), stage == VERTEX_K);
 				glUniform1f(singularity_shader.getUniformLocation("alpha"), alpha);
 				singularity_shader.bindUniformBlock("vertex_buffer", 0, singularity_ubo);
