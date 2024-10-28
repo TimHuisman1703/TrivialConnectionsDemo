@@ -414,10 +414,10 @@ int main(int argc, char** argv)
 
 			if (stage == CHOOSE_MESH) {
 				std::string mesh_name;
-				if (ImGui::Button("Cube (g = 0)", ImVec2(width, 19)))
-					mesh_name = "cube";
 				if (ImGui::Button("Icosphere (g = 0)", ImVec2(width, 19)))
 					mesh_name = "icosphere";
+				if (ImGui::Button("Cube (g = 0)", ImVec2(width, 19)))
+					mesh_name = "cube";
 				if (ImGui::Button("Torus (g = 1)", ImVec2(width, 19)))
 					mesh_name = "torus";
 				if (ImGui::Button("What? (g = 6)", ImVec2(width, 19)))

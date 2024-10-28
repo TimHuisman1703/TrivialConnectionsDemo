@@ -174,18 +174,6 @@ glm::vec3 MeshEx::edgeVector(int e_idx) const {
 	return vertexToVertex(e.vertices[0], e.vertices[1]);
 }
 
-// Obtained from: https://gamedev.stackexchange.com/questions/60630/how-do-i-find-the-circumcenter-of-a-triangle-in-3d
-glm::vec3 MeshEx::circumcircleCenter(int f_idx) const {
-	const FaceEx& f = faces[f_idx];
-
-	glm::vec3 a = vertices[f.vertices[0]].position;
-	glm::vec3 ab = vertexToVertex(f.vertices[0], f.vertices[1]);
-	glm::vec3 ac = vertexToVertex(f.vertices[0], f.vertices[2]);
-	glm::vec3 abXac = glm::cross(ab, ac);
-
-	return a + (glm::cross(abXac, ab) * glm::dot(ac, ac) + glm::cross(ac, abXac) * glm::dot(ab, ab)) / (2 * glm::dot(abXac, abXac));
-}
-
 glm::vec3 MeshEx::centerOfMass(int f_idx) const {
 	const FaceEx& f = faces[f_idx];
 

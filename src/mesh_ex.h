@@ -59,7 +59,6 @@ struct MeshEx {
 	glm::vec3 vertexToVertex(int v_src_idx, int v_dst_idx) const;
 	glm::vec3 edgeVector(int e_idx) const;
 
-	glm::vec3 circumcircleCenter(int f_idx) const;
 	glm::vec3 centerOfMass(int f_idx) const;
 
 	int edgePointToEdge(int e_a_idx, int e_b_idx) const;
